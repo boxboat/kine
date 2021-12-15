@@ -8,8 +8,11 @@ require (
 	github.com/go-sql-driver/mysql v1.6.0
 	github.com/lib/pq v1.10.2
 	github.com/mattn/go-sqlite3 v1.14.8
+	github.com/nats-io/nats-server/v2 v2.4.1-0.20210907200628-874c79fe411f // indirect
+	github.com/nats-io/nats.go v1.13.1-0.20211122170419-d7c1d78a50fc
 	github.com/pkg/errors v0.9.1
 	github.com/rancher/wrangler v0.8.3
+	github.com/shengdoushi/base58 v1.0.0
 	github.com/sirupsen/logrus v1.7.0
 	github.com/soheilhy/cmux v0.1.5
 	github.com/urfave/cli v1.21.0

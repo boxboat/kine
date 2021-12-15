@@ -3,6 +3,7 @@ package endpoint
 import (
 	"context"
 	"fmt"
+	"github.com/k3s-io/kine/pkg/drivers/jetstream"
 	"net"
 	"os"
 	"strings"
@@ -28,6 +29,7 @@ const (
 	SQLiteBackend   = "sqlite"
 	DQLiteBackend   = "dqlite"
 	ETCDBackend     = "etcd3"
+	JetStreamBackend = "jetstream"
 	MySQLBackend    = "mysql"
 	PostgresBackend = "postgres"
 )
@@ -233,6 +235,9 @@ func getKineStorageBackend(ctx context.Context, driver, dsn string, cfg Config) 
 		backend, err = pgsql.New(ctx, dsn, cfg.BackendTLSConfig, cfg.ConnectionPoolConfig)
 	case MySQLBackend:
 		backend, err = mysql.New(ctx, dsn, cfg.BackendTLSConfig, cfg.ConnectionPoolConfig)
+	case JetStreamBackend:
+		leaderElect = false
+		backend, err = jetstream.New(ctx, dsn)
 	default:
 		return false, nil, fmt.Errorf("storage backend is not defined")
 	}
@@ -246,6 +251,8 @@ func ParseStorageEndpoint(storageEndpoint string) (string, string) {
 	switch network {
 	case "":
 		return SQLiteBackend, ""
+	case "nats":
+		return JetStreamBackend, storageEndpoint
 	case "http":
 		fallthrough
 	case "https":
