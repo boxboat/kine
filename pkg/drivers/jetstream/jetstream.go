@@ -597,7 +597,8 @@ func (j *Jetstream) getKeys(ctx context.Context, prefix string) ([]string, error
 			if entry == nil {
 				break
 			}
-			if entry.Operation() == nats.KeyValuePut {
+			if entry.Operation() != nats.KeyValueDelete || entry.Operation() != nats.KeyValuePurge {
+				cache.keys[entry.Key()] = present{}
 				keys = append(keys, entry.Key())
 			}
 		}
@@ -608,14 +609,14 @@ func (j *Jetstream) getKeys(ctx context.Context, prefix string) ([]string, error
 				select {
 				case entry := <-watcher.Updates():
 					if entry != nil {
-						if entry.Operation() == nats.KeyValuePut {
-							cache.mutex.Lock()
-							cache.keys[entry.Key()] = present{}
-							cache.mutex.Unlock()
-						} else if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
+						if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
 							cache.mutex.Lock()
 							logrus.Debugf("deleting cache entry %s", entry.Key())
 							delete(cache.keys, entry.Key())
+							cache.mutex.Unlock()
+						} else {
+							cache.mutex.Lock()
+							cache.keys[entry.Key()] = present{}
 							cache.mutex.Unlock()
 						}
 					}
