@@ -487,20 +487,20 @@ func (j *Jetstream) Watch(ctx context.Context, key string, revision int64) <-cha
 			case i := <-watcher.Updates():
 				if i != nil {
 					//logrus.Debugf("update %v", i)
-					kv := make([]*server.Event, 1)
-					event, err := decode(i.Value())
+					events := make([]*server.Event, 1)
+					rev, event, err := j.get(ctx, i.Key(), int64(i.Revision()), true)
 					if err != nil {
 						logrus.Warnf("error decoding event %v", err)
 						continue
 					}
-					kv[0] = &event
-					kv[0].KV.ModRevision = int64(i.Revision())
+					events[0] = event
+					events[0].KV.ModRevision = rev
 					if i.Operation() == nats.KeyValueDelete {
-						kv[0].Delete = true
+						events[0].Delete = true
 					} else if i.Operation() == nats.KeyValuePut {
-						kv[0].Create = true
+						events[0].Create = true
 					}
-					result <- kv
+					result <- events
 				}
 			case <-ctx.Done():
 				if err := watcher.Stop(); err != nil {
