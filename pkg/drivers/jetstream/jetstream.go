@@ -145,7 +145,7 @@ func (j *Jetstream) Get(ctx context.Context, key string, revision int64) (revRet
 		}
 	}()
 
-	currentRev, err  := j.currentRevision()
+	currentRev, err := j.currentRevision()
 	if err != nil {
 		return currentRev, nil, err
 	}
@@ -468,13 +468,10 @@ func (j *Jetstream) Watch(ctx context.Context, key string, revision int64) <-cha
 
 	_, events, err := j.list(ctx, key, "", 0, 0)
 
-	ctx, cancel := context.WithCancel(ctx)
-
 	watcher, err := j.kvBucket.Watch(key)
 
 	if err != nil {
 		logrus.Errorf("failed to create watcher %s for revision %d", key, revision)
-		cancel()
 	}
 
 	result := make(chan []*server.Event, 100)
@@ -485,29 +482,36 @@ func (j *Jetstream) Watch(ctx context.Context, key string, revision int64) <-cha
 			result <- events
 		}
 
-		for i := range watcher.Updates() {
-			if i != nil {
-				//logrus.Debugf("update %v", i)
-				kv := make([]*server.Event, 1)
-				event, err := decode(i.Value())
-				if err != nil {
-					logrus.Warnf("error decoding event %v", err)
-					continue
+		for {
+			select {
+			case i := <-watcher.Updates():
+				if i != nil {
+					//logrus.Debugf("update %v", i)
+					kv := make([]*server.Event, 1)
+					event, err := decode(i.Value())
+					if err != nil {
+						logrus.Warnf("error decoding event %v", err)
+						continue
+					}
+					kv[0] = &event
+					kv[0].KV.ModRevision = int64(i.Revision())
+					if i.Operation() == nats.KeyValueDelete {
+						kv[0].Delete = true
+					} else if i.Operation() == nats.KeyValuePut {
+						kv[0].Create = true
+					}
+					result <- kv
 				}
-				kv[0] = &event
-				kv[0].KV.ModRevision = int64(i.Revision())
-				if i.Operation() == nats.KeyValueDelete {
-					kv[0].Delete = true
-				} else if i.Operation() == nats.KeyValuePut {
-					kv[0].Create = true
+			case <-ctx.Done():
+				if err := watcher.Stop(); err != nil {
+					logrus.Warnf("error stopping %s watcher: %v", key, err)
+				} else {
+					logrus.Debugf("stopped %s watcher", key)
 				}
-				result <- kv
+				return
 			}
 		}
-		close(result)
-		cancel()
 	}()
-
 	return result
 }
 
@@ -622,26 +626,12 @@ func (j *Jetstream) getKeys(ctx context.Context, prefix string) ([]string, error
 						logrus.Warnf("failed to stop watcher %s", prefix)
 					}
 					j.mutex.Lock()
-					if c, ok := j.keyWatchCache[prefix]; ok && c == cache{
+					if c, ok := j.keyWatchCache[prefix]; ok && c == cache {
 						delete(j.keyWatchCache, prefix)
 					}
 					j.mutex.Unlock()
 				}
 			}
-			//for entry := range watcher.Updates() {
-			//	if entry != nil {
-			//		if entry.Operation() == nats.KeyValuePut {
-			//			j.mutex.Lock()
-			//			cache.keys[entry.Key()] = present{}
-			//			j.mutex.Unlock()
-			//		} else if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
-			//			j.mutex.Lock()
-			//			delete(cache.keys, entry.Key())
-			//			j.mutex.Unlock()
-			//		}
-			//	}
-			//}
-			//cancel()
 		}()
 
 		return keys, nil
