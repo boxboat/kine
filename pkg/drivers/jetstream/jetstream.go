@@ -16,6 +16,7 @@ const (
 	kineBucket    = "kine"
 	kineTtlBucket = "kineTTL"
 	revHistory    = 1000
+	ttl           = 10 * time.Minute
 )
 
 type Jetstream struct {
@@ -23,13 +24,15 @@ type Jetstream struct {
 	jetStream nats.JetStreamContext
 	server.Backend
 	keyWatchCache map[string]*keyWatcherCache
-	mutex *sync.Mutex
+	mutex         *sync.Mutex
 }
 
-type present struct {}
+type present struct{}
 type keyWatcherCache struct {
 	watcher nats.KeyWatcher
+	timeout *time.Timer
 	keys    map[string]present
+	mutex   *sync.Mutex
 }
 
 // New get the JetStream Backend, establish connection to NATS JetStream.
@@ -52,7 +55,7 @@ func New(ctx context.Context, connection string) (server.Backend, error) {
 			&nats.KeyValueConfig{
 				Bucket:      kineBucket,
 				Description: "Holds kine key/values",
-				History: 64,
+				History:     64,
 			})
 	}
 
@@ -89,10 +92,10 @@ func New(ctx context.Context, connection string) (server.Backend, error) {
 	//}
 
 	return &Jetstream{
-		kvBucket:  kvB,
-		jetStream: js,
+		kvBucket:      kvB,
+		jetStream:     js,
 		keyWatchCache: make(map[string]*keyWatcherCache),
-		mutex: &sync.Mutex{},
+		mutex:         &sync.Mutex{},
 	}, nil
 }
 
@@ -101,7 +104,7 @@ func (j *Jetstream) Start(ctx context.Context) error {
 	return nil
 }
 
-func (j *Jetstream) isKeyExpiredRetrieveValue(ctx context.Context, key string) (bool, error){
+func (j *Jetstream) isKeyExpiredRetrieveValue(ctx context.Context, key string) (bool, error) {
 
 	entry, err := j.kvBucket.Get(key)
 	if err != nil {
@@ -112,10 +115,10 @@ func (j *Jetstream) isKeyExpiredRetrieveValue(ctx context.Context, key string) (
 		return false, err
 	}
 
-	return j.isKeyExpired(ctx,entry.Created(), &val), err
+	return j.isKeyExpired(ctx, entry.Created(), &val), err
 }
 
-func (j *Jetstream) isKeyExpired(ctx context.Context, createTime time.Time, event *server.Event) bool {
+func (j *Jetstream) isKeyExpired(_ context.Context, createTime time.Time, event *server.Event) bool {
 
 	requestTime := time.Now()
 	expired := false
@@ -135,17 +138,21 @@ func (j *Jetstream) isKeyExpired(ctx context.Context, createTime time.Time, even
 func (j *Jetstream) Get(ctx context.Context, key string, revision int64) (revRet int64, kvRet *server.KeyValue, errRet error) {
 	logrus.Tracef("GET %s, rev=%d", key, revision)
 	defer func() {
-		if kvRet != nil{
+		if kvRet != nil {
 			logrus.Tracef("GET %s, rev=%d => revRet=%d, kv=%v, size=%d, err=%v", key, revision, revRet, kvRet != nil, len(kvRet.Value), errRet)
 		} else {
 			logrus.Tracef("GET %s, rev=%d => revRet=%d, kv=%v, err=%v", key, revision, revRet, kvRet != nil, errRet)
 		}
 	}()
 
+	currentRev, err  := j.currentRevision()
+	if err != nil {
+		return currentRev, nil, err
+	}
 	rev, event, err := j.get(ctx, key, revision, false)
 	if err != nil {
 		if err == nats.ErrKeyNotFound {
-			return rev, nil, nil
+			return currentRev, nil, nil
 		} else {
 			return rev, nil, err
 		}
@@ -170,7 +177,7 @@ func (j *Jetstream) get(ctx context.Context, key string, revision int64, include
 			if err != nil {
 				return 0, nil, err
 			}
-			if j.isKeyExpired(ctx, entry.Created(), &val){
+			if j.isKeyExpired(ctx, entry.Created(), &val) {
 				return 0, nil, nats.ErrKeyNotFound
 			}
 			val.KV.ModRevision = int64(entry.Revision())
@@ -192,14 +199,14 @@ func (j *Jetstream) get(ctx context.Context, key string, revision int64, include
 	}
 	for _, entry := range entries {
 		if entry.Revision() == uint64(revision) {
-			if entry.Operation() == nats.KeyValueDelete && !includeDeletes{
+			if entry.Operation() == nats.KeyValueDelete && !includeDeletes {
 				return 0, nil, nil
 			}
 			val, err := decode(entry.Value())
 			if err != nil {
 				return 0, nil, err
 			}
-			if j.isKeyExpired(ctx, entry.Created(), &val){
+			if j.isKeyExpired(ctx, entry.Created(), &val) {
 				return 0, nil, nats.ErrKeyNotFound
 			}
 			val.KV.ModRevision = revision
@@ -240,7 +247,7 @@ func (j *Jetstream) Create(ctx context.Context, key string, value []byte, lease 
 			Lease:          lease,
 		},
 		PrevKV: &server.KeyValue{
-			ModRevision:  rev,
+			ModRevision: rev,
 		},
 	}
 	if prevEvent != nil {
@@ -261,7 +268,7 @@ func (j *Jetstream) Create(ctx context.Context, key string, value []byte, lease 
 }
 
 func (j *Jetstream) Delete(ctx context.Context, key string, revision int64) (revRet int64, kvRet *server.KeyValue, deletedRet bool, errRet error) {
-	logrus.Tracef("DELETE %s, rev=%d => rev=%d", key, revision)
+	logrus.Tracef("DELETE %s, rev=%d", key)
 	defer func() {
 		logrus.Tracef("DELETE %s, rev=%d => rev=%d, kv=%v, deleted=%v, err=%v", key, revision, revRet, kvRet != nil, deletedRet, errRet)
 	}()
@@ -279,7 +286,7 @@ func (j *Jetstream) Delete(ctx context.Context, key string, revision int64) (rev
 		return rev, kv, false, nil
 	}
 
-	err = j.kvBucket.Delete(key)
+	err = j.kvBucket.Purge(key)
 	if err != nil {
 		return rev, kv, false, nil
 	}
@@ -319,14 +326,14 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 	kvs := make([]*server.KeyValue, 0)
 	for _, key := range keys {
 		//if strings.HasPrefix(key, prefix) {
-			if count < limit || limit == 0 {
-				if _, entry, err := j.Get(ctx, key, 0); err == nil {
-					kvs = append(kvs, entry)
-					count++
-				}
-			} else {
-				break
+		if count < limit || limit == 0 {
+			if _, entry, err := j.Get(ctx, key, 0); err == nil {
+				kvs = append(kvs, entry)
+				count++
 			}
+		} else {
+			break
+		}
 		//}
 	}
 	return rev, kvs, nil
@@ -360,14 +367,14 @@ func (j *Jetstream) list(ctx context.Context, prefix, startKey string, limit, re
 	events := make([]*server.Event, 0)
 	for _, key := range keys {
 		//if strings.HasPrefix(key, prefix) {
-			if count < limit || limit == 0 {
-				if _, entry, err := j.get(ctx, key, 0, false); err == nil {
-					events = append(events, entry)
-					count++
-				}
-			} else {
-				break
+		if count < limit || limit == 0 {
+			if _, entry, err := j.get(ctx, key, 0, false); err == nil {
+				events = append(events, entry)
+				count++
 			}
+		} else {
+			break
+		}
 		//}
 	}
 	return rev, events, nil
@@ -386,19 +393,18 @@ func (j *Jetstream) Count(ctx context.Context, prefix string) (revRet int64, cou
 		return 0, 0, err
 	}
 	// current revision
-	currentRev, err  := j.currentRevision()
+	currentRev, err := j.currentRevision()
 	if err != nil {
 		return 0, 0, err
 	}
 	//sort.Strings(keys)
-	//var total int64 = 0
-	//for _, key := range keys {
-	//	if expired, err := j.isKeyExpiredRetrieveValue(ctx, key); err == nil && !expired {
-	//		if strings.HasPrefix(key, prefix) {
-	//			total++
-	//		}
-	//	}
-	//}
+	var total int64 = 0
+	for _, key := range keys {
+		// TODO scan keys for TTL expiration or continue to check just in time?
+		if expired, err := j.isKeyExpiredRetrieveValue(ctx, key); err == nil && !expired {
+			total++
+		}
+	}
 	return currentRev, int64(len(keys)), nil
 }
 
@@ -429,7 +435,7 @@ func (j *Jetstream) Update(ctx context.Context, key string, value []byte, revisi
 	updateEvent := server.Event{
 		Delete: false,
 		Create: false,
-		KV:     &server.KeyValue{
+		KV: &server.KeyValue{
 			Key:            key,
 			CreateRevision: event.KV.CreateRevision,
 			Value:          value,
@@ -552,26 +558,30 @@ func (j *Jetstream) currentRevision() (int64, error) {
 func (j *Jetstream) getKeys(ctx context.Context, prefix string) ([]string, error) {
 	logrus.Debugf("getKeys %s", prefix)
 
-	if cache, ok := j.keyWatchCache[prefix]; ok {
-		j.mutex.Lock()
+	j.mutex.Lock()
+	cache, ok := j.keyWatchCache[prefix]
+	j.mutex.Unlock()
+
+	if ok && cache.timeout.Stop() {
+		cache.mutex.Lock()
 		keys := make([]string, 0)
 		for k := range cache.keys {
 			keys = append(keys, k)
 		}
-		j.mutex.Unlock()
+		cache.mutex.Unlock()
+		cache.timeout.Reset(ttl)
 		return keys, nil
 	} else {
-		// ctx currently unused
-		_, cancel := context.WithCancel(ctx)
 
 		watcher, err := j.kvBucket.Watch(prefix, nats.MetaOnly())
 		if err != nil {
-			cancel()
 			return nil, err
 		}
 		cache := &keyWatcherCache{
 			watcher: watcher,
+			timeout: time.NewTimer(ttl),
 			keys:    make(map[string]present),
+			mutex:   &sync.Mutex{},
 		}
 		j.mutex.Lock()
 		j.keyWatchCache[prefix] = cache
@@ -590,20 +600,48 @@ func (j *Jetstream) getKeys(ctx context.Context, prefix string) ([]string, error
 
 		// start goroutine to watch for updates to the watched prefix
 		go func() {
-			for entry := range watcher.Updates() {
-				if entry != nil {
-					if entry.Operation() == nats.KeyValuePut {
-						j.mutex.Lock()
-						cache.keys[entry.Key()] = present{}
-						j.mutex.Unlock()
-					} else if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
-						j.mutex.Lock()
-						delete(cache.keys, entry.Key())
-						j.mutex.Unlock()
+			for {
+				select {
+				case entry := <-watcher.Updates():
+					if entry != nil {
+						if entry.Operation() == nats.KeyValuePut {
+							cache.mutex.Lock()
+							cache.keys[entry.Key()] = present{}
+							cache.mutex.Unlock()
+						} else if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
+							cache.mutex.Lock()
+							logrus.Debugf("deleting cache entry %s", entry.Key())
+							delete(cache.keys, entry.Key())
+							cache.mutex.Unlock()
+						}
 					}
+				case <-cache.timeout.C:
+					logrus.Debugf("removing %s watcher", prefix)
+					// TODO MUST FIX watcher.Stop()
+					if err := watcher.Stop(); err != nil {
+						logrus.Warnf("failed to stop watcher %s", prefix)
+					}
+					j.mutex.Lock()
+					if c, ok := j.keyWatchCache[prefix]; ok && c == cache{
+						delete(j.keyWatchCache, prefix)
+					}
+					j.mutex.Unlock()
 				}
 			}
-			cancel()
+			//for entry := range watcher.Updates() {
+			//	if entry != nil {
+			//		if entry.Operation() == nats.KeyValuePut {
+			//			j.mutex.Lock()
+			//			cache.keys[entry.Key()] = present{}
+			//			j.mutex.Unlock()
+			//		} else if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
+			//			j.mutex.Lock()
+			//			delete(cache.keys, entry.Key())
+			//			j.mutex.Unlock()
+			//		}
+			//	}
+			//}
+			//cancel()
 		}()
 
 		return keys, nil
