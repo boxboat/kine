@@ -286,7 +286,7 @@ func (j *Jetstream) Delete(ctx context.Context, key string, revision int64) (rev
 		return rev, kv, false, nil
 	}
 
-	err = j.kvBucket.Purge(key)
+	err = j.kvBucket.Delete(key)
 	if err != nil {
 		return rev, kv, false, nil
 	}
