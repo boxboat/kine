@@ -15,7 +15,7 @@ import (
 const (
 	kineBucket    = "kine"
 	kineTtlBucket = "kineTTL"
-	revHistory    = 1000
+	revHistory    = 64
 	ttl           = 10 * time.Minute
 )
 
@@ -55,7 +55,7 @@ func New(ctx context.Context, connection string) (server.Backend, error) {
 			&nats.KeyValueConfig{
 				Bucket:      kineBucket,
 				Description: "Holds kine key/values",
-				History:     64,
+				History:     revHistory,
 			})
 	}
 
@@ -110,7 +110,7 @@ func (j *Jetstream) isKeyExpiredRetrieveValue(ctx context.Context, key string) (
 	if err != nil {
 		return false, err
 	}
-	val, err := decode(entry.Value())
+	val, err := decode(entry)
 	if err != nil {
 		return false, err
 	}
@@ -173,16 +173,12 @@ func (j *Jetstream) get(ctx context.Context, key string, revision int64, include
 			if entry.Operation() == nats.KeyValueDelete && !includeDeletes {
 				return 0, nil, nil
 			}
-			val, err := decode(entry.Value())
+			val, err := decode(entry)
 			if err != nil {
 				return 0, nil, err
 			}
 			if j.isKeyExpired(ctx, entry.Created(), &val) {
 				return 0, nil, nats.ErrKeyNotFound
-			}
-			val.KV.ModRevision = int64(entry.Revision())
-			if entry.Operation() == nats.KeyValueDelete {
-				val.Delete = true
 			}
 			return int64(entry.Revision()), &val, nil
 		} else if err == nats.ErrKeyNotFound {
@@ -202,16 +198,12 @@ func (j *Jetstream) get(ctx context.Context, key string, revision int64, include
 			if entry.Operation() == nats.KeyValueDelete && !includeDeletes {
 				return 0, nil, nil
 			}
-			val, err := decode(entry.Value())
+			val, err := decode(entry)
 			if err != nil {
 				return 0, nil, err
 			}
 			if j.isKeyExpired(ctx, entry.Created(), &val) {
 				return 0, nil, nats.ErrKeyNotFound
-			}
-			val.KV.ModRevision = revision
-			if entry.Operation() == nats.KeyValueDelete {
-				val.Delete = true
 			}
 			return revision, &val, nil
 		}
@@ -268,30 +260,45 @@ func (j *Jetstream) Create(ctx context.Context, key string, value []byte, lease 
 }
 
 func (j *Jetstream) Delete(ctx context.Context, key string, revision int64) (revRet int64, kvRet *server.KeyValue, deletedRet bool, errRet error) {
-	logrus.Tracef("DELETE %s, rev=%d", key)
+	logrus.Tracef("DELETE %s, rev=%d", key, revision)
 	defer func() {
 		logrus.Tracef("DELETE %s, rev=%d => rev=%d, kv=%v, deleted=%v, err=%v", key, revision, revRet, kvRet != nil, deletedRet, errRet)
 	}()
 
-	rev, kv, err := j.Get(ctx, key, 0)
+	rev, event, err := j.get(ctx, key, 0, true)
 	if err != nil {
 		return 0, nil, false, err
 	}
 
-	if kv == nil {
+	if event == nil {
 		return rev, nil, true, nil
 	}
 
-	if revision != 0 && kv.ModRevision != revision {
-		return rev, kv, false, nil
+	if event.Delete {
+		return rev, event.KV, true, nil
 	}
 
-	err = j.kvBucket.Delete(key)
+	if revision != 0 && event.KV.ModRevision != revision {
+		return rev, event.KV, false, nil
+	}
+
+	deleteEvent := server.Event{
+		Delete: true,
+		KV: event.KV,
+		PrevKV: event.KV,
+	}
+	deleteEventBytes, err := encode(deleteEvent)
 	if err != nil {
-		return rev, kv, false, nil
+		return rev, nil, false, err
+	}
+	deleteRev, err := j.kvBucket.Put(key, deleteEventBytes)
+
+	//err = j.kvBucket.Delete(key)
+	if err != nil {
+		return rev, event.KV, false, nil
 	}
 
-	return rev, kv, true, nil
+	return int64(deleteRev), event.KV, true, nil
 }
 
 func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, revision int64) (revRet int64, kvRet []*server.KeyValue, errRet error) {
@@ -488,6 +495,10 @@ func (j *Jetstream) Watch(ctx context.Context, key string, revision int64) <-cha
 				if i != nil {
 					//logrus.Debugf("update %v", i)
 					events := make([]*server.Event, 1)
+
+
+					// TODO
+
 					rev, event, err := j.get(ctx, i.Key(), int64(i.Revision()), true)
 					if err != nil {
 						logrus.Warnf("error decoding event %v", err)
@@ -495,11 +506,11 @@ func (j *Jetstream) Watch(ctx context.Context, key string, revision int64) <-cha
 					}
 					events[0] = event
 					events[0].KV.ModRevision = rev
-					if i.Operation() == nats.KeyValueDelete {
-						events[0].Delete = true
-					} else if i.Operation() == nats.KeyValuePut {
-						events[0].Create = true
-					}
+					//if i.Operation() == nats.KeyValueDelete {
+					//	events[0].Delete = true
+					//} else if i.Operation() == nats.KeyValuePut {
+					//	events[0].Create = true
+					//}
 					result <- events
 				}
 			case <-ctx.Done():
@@ -545,9 +556,14 @@ func encode(event server.Event) ([]byte, error) {
 	return buf, err
 }
 
-func decode(b []byte) (server.Event, error) {
+func decode(e nats.KeyValueEntry) (server.Event, error) {
 	event := server.Event{}
-	err := json.Unmarshal(b, &event)
+	err := json.Unmarshal(e.Value(), &event)
+
+	event.KV.ModRevision = int64(e.Revision())
+	if e.Operation() == nats.KeyValueDelete {
+		event.Delete = true
+	}
 	return event, err
 }
 
@@ -597,10 +613,10 @@ func (j *Jetstream) getKeys(ctx context.Context, prefix string) ([]string, error
 			if entry == nil {
 				break
 			}
-			//if entry.Operation() != nats.KeyValueDelete || entry.Operation() != nats.KeyValuePurge {
+			if entry.Operation() != nats.KeyValueDelete || entry.Operation() != nats.KeyValuePurge {
 				cache.keys[entry.Key()] = present{}
 				keys = append(keys, entry.Key())
-			//}
+			}
 		}
 
 		// start goroutine to watch for updates to the watched prefix
@@ -609,16 +625,16 @@ func (j *Jetstream) getKeys(ctx context.Context, prefix string) ([]string, error
 				select {
 				case entry := <-watcher.Updates():
 					if entry != nil {
-						//if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
-						//	cache.mutex.Lock()
-						//	logrus.Debugf("deleting cache entry %s", entry.Key())
-						//	delete(cache.keys, entry.Key())
-						//	cache.mutex.Unlock()
-						//} else {
+						if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
+							cache.mutex.Lock()
+							logrus.Debugf("deleting cache entry %s", entry.Key())
+							delete(cache.keys, entry.Key())
+							cache.mutex.Unlock()
+						} else {
 							cache.mutex.Lock()
 							cache.keys[entry.Key()] = present{}
 							cache.mutex.Unlock()
-						//}
+						}
 					}
 				case <-cache.timeout.C:
 					logrus.Debugf("removing %s watcher", prefix)
