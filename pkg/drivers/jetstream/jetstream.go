@@ -149,16 +149,13 @@ func (j *Jetstream) Get(ctx context.Context, key string, revision int64) (revRet
 	if err != nil {
 		return currentRev, nil, err
 	}
-	rev, event, err := j.get(ctx, key, revision, false)
-	if err != nil {
-		if err == nats.ErrKeyNotFound {
+	if rev, event, err := j.get(ctx, key, revision, false); err == nil {
+		if event == nil {
 			return currentRev, nil, nil
-		} else {
-			return rev, nil, err
 		}
-	}
-	if event != nil {
-		return rev, event.KV, err
+		return rev, event.KV, nil
+	} else if err == nats.ErrKeyNotFound {
+		return currentRev, nil, nil
 	} else {
 		return rev, nil, err
 	}
@@ -170,17 +167,19 @@ func (j *Jetstream) get(ctx context.Context, key string, revision int64, include
 	if revision <= 0 {
 		if entry, err := j.kvBucket.Get(key); err == nil {
 
-			if entry.Operation() == nats.KeyValueDelete && !includeDeletes {
-				return 0, nil, nil
-			}
 			val, err := decode(entry)
 			if err != nil {
 				return 0, nil, err
 			}
+
+			if val.Delete && !includeDeletes {
+				return 0, nil, nil
+			}
+
 			if j.isKeyExpired(ctx, entry.Created(), &val) {
 				return 0, nil, nats.ErrKeyNotFound
 			}
-			return int64(entry.Revision()), &val, nil
+			return val.KV.ModRevision, &val, nil
 		} else if err == nats.ErrKeyNotFound {
 			return 0, nil, err
 		} else {
@@ -189,18 +188,19 @@ func (j *Jetstream) get(ctx context.Context, key string, revision int64, include
 	}
 
 	// Find a particular version
-	entries, err := j.kvBucket.History(key, nats.IncludeHistory())
+	entries, err := j.kvBucket.History(key)
 	if err != nil {
 		return 0, nil, err
 	}
 	for _, entry := range entries {
 		if entry.Revision() == uint64(revision) {
-			if entry.Operation() == nats.KeyValueDelete && !includeDeletes {
-				return 0, nil, nil
-			}
 			val, err := decode(entry)
 			if err != nil {
+				logrus.Warnf("get %s rev=%d decode failed: %v", key, revision, err)
 				return 0, nil, err
+			}
+			if val.Delete && !includeDeletes {
+				return 0, nil, nats.ErrKeyNotFound
 			}
 			if j.isKeyExpired(ctx, entry.Created(), &val) {
 				return 0, nil, nats.ErrKeyNotFound
@@ -284,7 +284,7 @@ func (j *Jetstream) Delete(ctx context.Context, key string, revision int64) (rev
 
 	deleteEvent := server.Event{
 		Delete: true,
-		KV: event.KV,
+		KV:     event.KV,
 		PrevKV: event.KV,
 	}
 	deleteEventBytes, err := encode(deleteEvent)
@@ -376,7 +376,9 @@ func (j *Jetstream) list(ctx context.Context, prefix, startKey string, limit, re
 		//if strings.HasPrefix(key, prefix) {
 		if count < limit || limit == 0 {
 			if _, entry, err := j.get(ctx, key, 0, false); err == nil {
-				events = append(events, entry)
+				//if !entry.Delete {
+					events = append(events, entry)
+				//}
 				count++
 			}
 		} else {
@@ -407,10 +409,15 @@ func (j *Jetstream) Count(ctx context.Context, prefix string) (revRet int64, cou
 	//sort.Strings(keys)
 	var total int64 = 0
 	for _, key := range keys {
-		// TODO scan keys for TTL expiration or continue to check just in time?
-		if expired, err := j.isKeyExpiredRetrieveValue(ctx, key); err == nil && !expired {
+
+		if _, _, err := j.get(ctx, key, 0, false); err == nil {
 			total++
 		}
+		
+		// TODO scan keys for TTL expiration or continue to check just in time?
+		//if expired, err := j.isKeyExpiredRetrieveValue(ctx, key); err == nil && !expired {
+		//	total++
+		//}
 	}
 	return currentRev, int64(len(keys)), nil
 }
@@ -496,16 +503,13 @@ func (j *Jetstream) Watch(ctx context.Context, key string, revision int64) <-cha
 					//logrus.Debugf("update %v", i)
 					events := make([]*server.Event, 1)
 
-
-					// TODO
-
-					rev, event, err := j.get(ctx, i.Key(), int64(i.Revision()), true)
+					_, event, err := j.get(ctx, i.Key(), int64(i.Revision()), true)
 					if err != nil {
 						logrus.Warnf("error decoding event %v", err)
 						continue
 					}
 					events[0] = event
-					events[0].KV.ModRevision = rev
+					//events[0].KV.ModRevision = rev
 					//if i.Operation() == nats.KeyValueDelete {
 					//	events[0].Delete = true
 					//} else if i.Operation() == nats.KeyValuePut {
@@ -575,6 +579,14 @@ func (j *Jetstream) currentRevision() (int64, error) {
 	return int64(status.(*nats.KeyValueBucketStatus).StreamInfo().State.LastSeq), nil
 }
 
+func (j *Jetstream) compactRevision() (int64, error) {
+	status, err := j.kvBucket.Status()
+	if err != nil {
+		return 0, err
+	}
+	return int64(status.(*nats.KeyValueBucketStatus).StreamInfo().State.FirstSeq), nil
+}
+
 func (j *Jetstream) getKeys(ctx context.Context, prefix string) ([]string, error) {
 	logrus.Debugf("getKeys %s", prefix)
 
@@ -593,7 +605,7 @@ func (j *Jetstream) getKeys(ctx context.Context, prefix string) ([]string, error
 		return keys, nil
 	} else {
 
-		watcher, err := j.kvBucket.Watch(prefix, nats.MetaOnly())
+		watcher, err := j.kvBucket.Watch(prefix)
 		if err != nil {
 			return nil, err
 		}
