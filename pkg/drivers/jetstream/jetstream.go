@@ -251,12 +251,19 @@ func (j *Jetstream) Create(ctx context.Context, key string, value []byte, lease 
 		return 0, err
 	}
 
-	seq, err := j.kvBucket.Create(key, event)
-	if err != nil {
-		return 0, err
+	if prevEvent != nil {
+		seq, err := j.kvBucket.Create(key, event)
+		if err != nil {
+			return 0, err
+		}
+		return int64(seq), nil
+	} else {
+		seq, err := j.kvBucket.Put(key, event)
+		if err != nil {
+			return 0, err
+		}
+		return int64(seq), nil
 	}
-
-	return int64(seq), nil
 }
 
 func (j *Jetstream) Delete(ctx context.Context, key string, revision int64) (revRet int64, kvRet *server.KeyValue, deletedRet bool, errRet error) {
@@ -413,7 +420,7 @@ func (j *Jetstream) Count(ctx context.Context, prefix string) (revRet int64, cou
 		if _, _, err := j.get(ctx, key, 0, false); err == nil {
 			total++
 		}
-		
+
 		// TODO scan keys for TTL expiration or continue to check just in time?
 		//if expired, err := j.isKeyExpiredRetrieveValue(ctx, key); err == nil && !expired {
 		//	total++
