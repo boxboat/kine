@@ -331,11 +331,7 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 	}
 
 	if revision == 0 && len(keys) == 0 {
-		if err != nil {
-			return 0, nil, err
-		}
-
-		return j.List(ctx, prefix, startKey, limit, rev)
+		return rev, nil, nil
 	} else if revision != 0 {
 		rev = revision
 	}
@@ -372,11 +368,7 @@ func (j *Jetstream) list(ctx context.Context, prefix, startKey string, limit, re
 	}
 
 	if revision == 0 && len(keys) == 0 {
-		if err != nil {
-			return 0, nil, err
-		}
-
-		return j.list(ctx, prefix, startKey, limit, rev)
+		return rev, nil, nil
 	} else if revision != 0 {
 		rev = revision
 	}
