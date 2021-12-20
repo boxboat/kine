@@ -18,8 +18,8 @@ type KeyCodec interface {
 }
 
 type encodedKV struct {
-	bucket    nats.KeyValue
-	keyCodec  KeyCodec
+	bucket   nats.KeyValue
+	keyCodec KeyCodec
 }
 
 type watcher struct {
@@ -190,7 +190,7 @@ func (e *encodedKV) WatchAll(opts ...nats.WatchOpt) (nats.KeyWatcher, error) {
 	return e.bucket.WatchAll(opts...)
 }
 func (e *encodedKV) Keys(opts ...nats.WatchOpt) ([]string, error) {
-	keys,err := e.bucket.Keys(opts...)
+	keys, err := e.bucket.Keys(opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -207,29 +207,6 @@ func (e *encodedKV) Keys(opts ...nats.WatchOpt) ([]string, error) {
 	return res, nil
 }
 
-// KeyRange will return a matching key if prefix is exact match or a list of matching keys.
-func (kv *encodedKV) KeyRange(prefix string, opts ...nats.WatchOpt) ([]string, error) {
-	ek, err := kv.keyCodec.EncodeRange(prefix)
-	opts = append(opts, nats.IgnoreDeletes(), nats.MetaOnly())
-	watcher, err := kv.Watch(ek, opts...)
-	if err != nil {
-		return nil, err
-	}
-	defer watcher.Stop()
-
-	var keys []string
-	for entry := range watcher.Updates() {
-		if entry == nil {
-			break
-		}
-		keys = append(keys, entry.Key())
-	}
-	if len(keys) == 0 {
-		return nil, nats.ErrNoKeysFound
-	}
-	return keys, nil
-}
-
-func (e *encodedKV) Bucket() string                               { return e.bucket.Bucket() }
-func (e *encodedKV) PurgeDeletes(opts ...nats.WatchOpt) error     { return e.bucket.PurgeDeletes(opts...) }
-func (e *encodedKV) Status() (nats.KeyValueStatus, error)         { return e.bucket.Status() }
+func (e *encodedKV) Bucket() string                           { return e.bucket.Bucket() }
+func (e *encodedKV) PurgeDeletes(opts ...nats.WatchOpt) error { return e.bucket.PurgeDeletes(opts...) }
+func (e *encodedKV) Status() (nats.KeyValueStatus, error)     { return e.bucket.Status() }

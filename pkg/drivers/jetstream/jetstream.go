@@ -252,13 +252,13 @@ func (j *Jetstream) Create(ctx context.Context, key string, value []byte, lease 
 	}
 
 	if prevEvent != nil {
-		seq, err := j.kvBucket.Create(key, event)
+		seq, err := j.kvBucket.Put(key, event)
 		if err != nil {
 			return 0, err
 		}
 		return int64(seq), nil
 	} else {
-		seq, err := j.kvBucket.Put(key, event)
+		seq, err := j.kvBucket.Create(key, event)
 		if err != nil {
 			return 0, err
 		}
@@ -298,9 +298,13 @@ func (j *Jetstream) Delete(ctx context.Context, key string, revision int64) (rev
 	if err != nil {
 		return rev, nil, false, err
 	}
-	deleteRev, err := j.kvBucket.Put(key, deleteEventBytes)
 
-	//err = j.kvBucket.Delete(key)
+	deleteRev, err := j.kvBucket.Put(key, deleteEventBytes)
+	if err != nil {
+		return rev, event.KV, false, nil
+	}
+
+	err = j.kvBucket.Delete(key)
 	if err != nil {
 		return rev, event.KV, false, nil
 	}
@@ -384,7 +388,7 @@ func (j *Jetstream) list(ctx context.Context, prefix, startKey string, limit, re
 		if count < limit || limit == 0 {
 			if _, entry, err := j.get(ctx, key, 0, false); err == nil {
 				//if !entry.Delete {
-					events = append(events, entry)
+				events = append(events, entry)
 				//}
 				count++
 			}
@@ -414,18 +418,13 @@ func (j *Jetstream) Count(ctx context.Context, prefix string) (revRet int64, cou
 		return 0, 0, err
 	}
 	//sort.Strings(keys)
-	var total int64 = 0
-	for _, key := range keys {
-
-		if _, _, err := j.get(ctx, key, 0, false); err == nil {
-			total++
-		}
-
-		// TODO scan keys for TTL expiration or continue to check just in time?
-		//if expired, err := j.isKeyExpiredRetrieveValue(ctx, key); err == nil && !expired {
-		//	total++
-		//}
-	}
+	//var total int64 = 0
+	//for _, key := range keys {
+	//	// TODO scan keys for TTL expiration or continue to check just in time?
+	//	if expired, err := j.isKeyExpiredRetrieveValue(ctx, key); err == nil && !expired {
+	//		total++
+	//	}
+	//}
 	return currentRev, int64(len(keys)), nil
 }
 
@@ -507,22 +506,18 @@ func (j *Jetstream) Watch(ctx context.Context, key string, revision int64) <-cha
 			select {
 			case i := <-watcher.Updates():
 				if i != nil {
-					//logrus.Debugf("update %v", i)
+					logrus.Debugf("update %v", i.Key())
 					events := make([]*server.Event, 1)
+					event, err := decode(i)
 
-					_, event, err := j.get(ctx, i.Key(), int64(i.Revision()), true)
-					if err != nil {
+					if err == nil {
+						events[0] = &event
+						result <- events
+					} else {
 						logrus.Warnf("error decoding event %v", err)
 						continue
 					}
-					events[0] = event
-					//events[0].KV.ModRevision = rev
-					//if i.Operation() == nats.KeyValueDelete {
-					//	events[0].Delete = true
-					//} else if i.Operation() == nats.KeyValuePut {
-					//	events[0].Create = true
-					//}
-					result <- events
+
 				}
 			case <-ctx.Done():
 				if err := watcher.Stop(); err != nil {
@@ -570,12 +565,17 @@ func encode(event server.Event) ([]byte, error) {
 func decode(e nats.KeyValueEntry) (server.Event, error) {
 	event := server.Event{}
 	err := json.Unmarshal(e.Value(), &event)
-
-	event.KV.ModRevision = int64(e.Revision())
-	if e.Operation() == nats.KeyValueDelete {
-		event.Delete = true
+	if err != nil {
+		logrus.Debugf("key: %s", e.Key())
+		logrus.Debugf("sequence number: %d", e.Revision())
+		logrus.Debugf("bytes returned: %v", len(e.Value()))
+		return event, err
 	}
-	return event, err
+
+	if event.KV.ModRevision == 0 {
+		event.KV.ModRevision = int64(e.Revision())
+	}
+	return event, nil
 }
 
 func (j *Jetstream) currentRevision() (int64, error) {
