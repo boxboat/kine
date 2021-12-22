@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"github.com/k3s-io/kine/pkg/drivers/jetstream/kv"
 	"github.com/sirupsen/logrus"
+	"sort"
 	"sync"
 	"time"
 
@@ -624,6 +625,7 @@ func (j *Jetstream) getKeys(ctx context.Context, prefix string) ([]string, error
 		}
 		cache.mutex.RUnlock()
 		cache.timeout.Reset(ttl)
+		sort.Strings(keys)
 		return keys, nil
 	} else {
 
