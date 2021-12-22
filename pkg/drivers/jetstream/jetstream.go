@@ -358,7 +358,7 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 	for _, key := range keys {
 		//if strings.HasPrefix(key, prefix) {
 		if count < limit || limit == 0 {
-			if _, entry, err := j.Get(ctx, key, 0); err == nil {
+			if _, entry, err := j.Get(ctx, key, 0); err == nil && entry != nil {
 				kvs = append(kvs, entry)
 				count++
 			}
@@ -395,7 +395,7 @@ func (j *Jetstream) list(ctx context.Context, prefix, startKey string, limit, re
 	for _, key := range keys {
 		//if strings.HasPrefix(key, prefix) {
 		if count < limit || limit == 0 {
-			if _, entry, err := j.get(ctx, key, 0, false); err == nil {
+			if _, entry, err := j.get(ctx, key, 0, false); err == nil && entry != nil {
 				//if !entry.Delete {
 				events = append(events, entry)
 				//}
