@@ -20,11 +20,12 @@ const (
 )
 
 type Jetstream struct {
-	kvBucket  nats.KeyValue
-	jetStream nats.JetStreamContext
+	kvBucket      nats.KeyValue
+	kvBucketMutex *sync.RWMutex
+	jetStream     nats.JetStreamContext
 	server.Backend
-	keyWatchCache map[string]*keyWatcherCache
-	mutex         *sync.Mutex
+	keyWatchCache      map[string]*keyWatcherCache
+	keyWatchCacheMutex *sync.RWMutex
 }
 
 type present struct{}
@@ -32,7 +33,7 @@ type keyWatcherCache struct {
 	watcher nats.KeyWatcher
 	timeout *time.Timer
 	keys    map[string]present
-	mutex   *sync.Mutex
+	mutex   *sync.RWMutex
 }
 
 // New get the JetStream Backend, establish connection to NATS JetStream.
@@ -92,15 +93,21 @@ func New(ctx context.Context, connection string) (server.Backend, error) {
 	//}
 
 	return &Jetstream{
-		kvBucket:      kvB,
-		jetStream:     js,
-		keyWatchCache: make(map[string]*keyWatcherCache),
-		mutex:         &sync.Mutex{},
+		kvBucket:           kvB,
+		kvBucketMutex:      &sync.RWMutex{},
+		jetStream:          js,
+		keyWatchCache:      make(map[string]*keyWatcherCache),
+		keyWatchCacheMutex: &sync.RWMutex{},
 	}, nil
 }
 
 func (j *Jetstream) Start(ctx context.Context) error {
-	// TODO
+	// See https://github.com/kubernetes/kubernetes/blob/442a69c3bdf6fe8e525b05887e57d89db1e2f3a5/staging/src/k8s.io/apiserver/pkg/storage/storagebackend/factory/etcd3.go#L97
+	if _, err := j.Create(ctx, "/registry/health", []byte(`{"health":"true"}`), 0); err != nil {
+		if err != server.ErrKeyExists {
+			logrus.Errorf("Failed to create health check key: %v", err)
+		}
+	}
 	return nil
 }
 
@@ -163,6 +170,7 @@ func (j *Jetstream) Get(ctx context.Context, key string, revision int64) (revRet
 
 func (j *Jetstream) get(ctx context.Context, key string, revision int64, includeDeletes bool) (int64, *server.Event, error) {
 	logrus.Tracef("get %s, revision=%d, includeDeletes=%v", key, revision, includeDeletes)
+
 	// Get latest revision
 	if revision <= 0 {
 		if entry, err := j.kvBucket.Get(key); err == nil {
@@ -218,6 +226,9 @@ func (j *Jetstream) Create(ctx context.Context, key string, value []byte, lease 
 		logrus.Tracef("CREATE %s, size=%d, lease=%d => rev=%d, err=%v", key, len(value), lease, revRet, errRet)
 	}()
 
+	j.kvBucketMutex.Lock()
+	defer j.kvBucketMutex.Unlock()
+
 	// check if key exists already
 	rev, prevEvent, err := j.get(ctx, key, 0, true)
 	if err != nil && err != nats.ErrKeyNotFound {
@@ -272,9 +283,16 @@ func (j *Jetstream) Delete(ctx context.Context, key string, revision int64) (rev
 		logrus.Tracef("DELETE %s, rev=%d => rev=%d, kv=%v, deleted=%v, err=%v", key, revision, revRet, kvRet != nil, deletedRet, errRet)
 	}()
 
+	j.kvBucketMutex.Lock()
+	defer j.kvBucketMutex.Unlock()
+
 	rev, event, err := j.get(ctx, key, 0, true)
 	if err != nil {
-		return 0, nil, false, err
+		if err == nats.ErrKeyNotFound {
+			return rev, nil, true, nil
+		} else {
+			return rev, nil, false, err
+		}
 	}
 
 	if event == nil {
@@ -318,7 +336,6 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 		logrus.Tracef("LIST %s, start=%s, limit=%d, rev=%d => rev=%d, kvs=%d, err=%v", prefix, startKey, limit, revision, revRet, len(kvRet), errRet)
 	}()
 
-	//keys, err := j.kvBucket.Keys()
 	keys, err := j.getKeys(ctx, prefix)
 
 	if err != nil {
@@ -355,7 +372,7 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 
 func (j *Jetstream) list(ctx context.Context, prefix, startKey string, limit, revision int64) (revRet int64, eventRet []*server.Event, errRet error) {
 	logrus.Tracef("list %s, start=%s, limit=%d, rev=%d", prefix, startKey, limit, revision)
-	//keys, err := j.kvBucket.Keys()
+
 	keys, err := j.getKeys(ctx, prefix)
 
 	if err != nil {
@@ -429,11 +446,17 @@ func (j *Jetstream) Update(ctx context.Context, key string, value []byte, revisi
 		}
 		logrus.Tracef("UPDATE %s, value=%d, rev=%d, lease=%v => rev=%d, kvrev=%d, updated=%v, err=%v", key, len(value), revision, lease, revRet, kvRev, updateRet, errRet)
 	}()
+	j.kvBucketMutex.Lock()
+	defer j.kvBucketMutex.Unlock()
 
 	rev, event, err := j.get(ctx, key, 0, false)
 
 	if err != nil {
-		return 0, nil, false, err
+		if err == nats.ErrKeyNotFound {
+			return rev, nil, false, nil
+		} else {
+			return rev, nil, false, err
+		}
 	}
 
 	if event == nil {
@@ -480,7 +503,7 @@ func (j *Jetstream) Watch(ctx context.Context, key string, revision int64) <-cha
 
 	_, events, err := j.list(ctx, key, "", 0, 0)
 
-	watcher, err := j.kvBucket.Watch(key)
+	watcher, err := j.kvBucket.Watch(key, nats.IgnoreDeletes())
 
 	if err != nil {
 		logrus.Errorf("failed to create watcher %s for revision %d", key, revision)
@@ -589,17 +612,17 @@ func (j *Jetstream) compactRevision() (int64, error) {
 func (j *Jetstream) getKeys(ctx context.Context, prefix string) ([]string, error) {
 	logrus.Debugf("getKeys %s", prefix)
 
-	j.mutex.Lock()
+	j.keyWatchCacheMutex.RLock()
 	cache, ok := j.keyWatchCache[prefix]
-	j.mutex.Unlock()
+	j.keyWatchCacheMutex.RUnlock()
 
 	if ok && cache.timeout.Stop() {
-		cache.mutex.Lock()
+		cache.mutex.RLock()
 		keys := make([]string, 0)
 		for k := range cache.keys {
 			keys = append(keys, k)
 		}
-		cache.mutex.Unlock()
+		cache.mutex.RUnlock()
 		cache.timeout.Reset(ttl)
 		return keys, nil
 	} else {
@@ -612,11 +635,11 @@ func (j *Jetstream) getKeys(ctx context.Context, prefix string) ([]string, error
 			watcher: watcher,
 			timeout: time.NewTimer(ttl),
 			keys:    make(map[string]present),
-			mutex:   &sync.Mutex{},
+			mutex:   &sync.RWMutex{},
 		}
-		j.mutex.Lock()
+		j.keyWatchCacheMutex.Lock()
 		j.keyWatchCache[prefix] = cache
-		j.mutex.Unlock()
+		j.keyWatchCacheMutex.Unlock()
 
 		var keys []string
 		// grab all matching keys immediately
@@ -649,15 +672,14 @@ func (j *Jetstream) getKeys(ctx context.Context, prefix string) ([]string, error
 					}
 				case <-cache.timeout.C:
 					logrus.Debugf("removing %s watcher", prefix)
-					// TODO MUST FIX watcher.Stop()
 					if err := watcher.Stop(); err != nil {
 						logrus.Warnf("failed to stop watcher %s", prefix)
 					}
-					j.mutex.Lock()
+					j.keyWatchCacheMutex.Lock()
 					if c, ok := j.keyWatchCache[prefix]; ok && c == cache {
 						delete(j.keyWatchCache, prefix)
 					}
-					j.mutex.Unlock()
+					j.keyWatchCacheMutex.Unlock()
 				}
 			}
 		}()
