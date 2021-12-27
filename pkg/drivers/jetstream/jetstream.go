@@ -350,12 +350,6 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 
 	// its assumed that when there is a start key that that key exists.
 	if strings.HasSuffix(prefix, "/") {
-		// In the situation of a list start the startKey will not exist so set to ""
-		if prefix == startKey {
-			startKey = ""
-		}
-	} else {
-		// also if this isn't a list no need to set startKey
 		startKey = ""
 	}
 
