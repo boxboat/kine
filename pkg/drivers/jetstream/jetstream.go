@@ -350,7 +350,9 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 
 	// its assumed that when there is a start key that that key exists.
 	if strings.HasSuffix(prefix, "/") {
-		startKey = ""
+		if prefix == startKey || strings.HasPrefix(prefix, startKey) {
+			startKey = ""
+		}
 	}
 
 	rev, err := j.currentRevision()
