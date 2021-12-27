@@ -369,6 +369,7 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 
 	// startkey listing so getting list of revisions of startKey matches after revision
 	if startKey != "" {
+		logrus.Debugf("Listing startKey=%s revisions", startKey)
 		entries, err := j.kvBucket.History(startKey)
 		if err != nil {
 
