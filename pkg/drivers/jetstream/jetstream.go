@@ -7,6 +7,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -347,10 +348,15 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 		logrus.Tracef("LIST %s, start=%s, limit=%d, rev=%d => rev=%d, kvs=%d, err=%v", prefix, startKey, limit, revision, revRet, len(kvRet), errRet)
 	}()
 
-	keys, err := j.getKeys(ctx, prefix)
-
-	if err != nil {
-		return 0, nil, err
+	// its assumed that when there is a start key that that key exists.
+	if strings.HasSuffix(prefix, "/") {
+		// In the situation of a list start the startKey will not exist so set to ""
+		if prefix == startKey {
+			startKey = ""
+		}
+	} else {
+		// also if this isn't a list no need to set startKey
+		startKey = ""
 	}
 
 	rev, err := j.currentRevision()
@@ -358,28 +364,58 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 		return 0, nil, err
 	}
 
-	if revision == 0 && len(keys) == 0 {
-		return rev, nil, nil
-	} else if revision != 0 {
-		rev = revision
-	}
-	var count int64 = 0
 	kvs := make([]*server.KeyValue, 0)
-	for _, key := range keys {
-		//if strings.HasPrefix(key, prefix) {
-		if count < limit || limit == 0 {
-			if key >= startKey {
+	var count int64 = 0
+
+	// startkey listing so getting list of revisions of startKey matches after revision
+	if startKey != "" {
+		entries, err := j.kvBucket.History(startKey)
+		if err != nil {
+
+		}
+		for i := len(entries) - 1; i >= 0; i-- {
+			if count < limit || limit == 0 {
+				e := entries[i]
+				if int64(e.Revision()) >= revision && count < limit {
+					if entry, err := decode(e); err == nil {
+						kvs = append(kvs, entry.KV)
+						count++
+					}
+				}
+			} else {
+				break
+			}
+		}
+		return rev, kvs, nil
+
+	} else {
+		// getting list of keys
+		keys, err := j.getKeys(ctx, prefix)
+
+		if err != nil {
+			return 0, nil, err
+		}
+
+		if revision == 0 && len(keys) == 0 {
+			return rev, nil, nil
+		}
+
+		if revision != 0 {
+			rev = revision
+		}
+
+		for _, key := range keys {
+			if count < limit || limit == 0 {
 				if _, entry, err := j.Get(ctx, key, 0); err == nil && entry != nil {
 					kvs = append(kvs, entry)
 					count++
 				}
+			} else {
+				break
 			}
-		} else {
-			break
 		}
-		//}
+		return rev, kvs, nil
 	}
-	return rev, kvs, nil
 }
 
 func (j *Jetstream) list(ctx context.Context, prefix, startKey string, limit, revision int64) (revRet int64, eventRet []*server.Event, errRet error) {
