@@ -376,7 +376,7 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 		for i := len(entries) - 1; i >= 0; i-- {
 			if count < limit || limit == 0 {
 				e := entries[i]
-				if int64(e.Revision()) >= revision && count < limit {
+				if int64(e.Revision()) >= revision {
 					if entry, err := decode(e); err == nil {
 						kvs = append(kvs, entry.KV)
 						count++
