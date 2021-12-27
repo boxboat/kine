@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"github.com/k3s-io/kine/pkg/drivers/jetstream/kv"
 	"github.com/sirupsen/logrus"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -14,10 +15,9 @@ import (
 )
 
 const (
-	kineBucket    = "kine"
-	kineTtlBucket = "kineTTL"
-	revHistory    = 64
-	ttl           = 10 * time.Minute
+	kineBucket = "kine"
+	revHistory = 64
+	ttl        = 10 * time.Minute
 )
 
 type Jetstream struct {
@@ -39,7 +39,17 @@ type keyWatcherCache struct {
 
 // New get the JetStream Backend, establish connection to NATS JetStream.
 func New(ctx context.Context, connection string) (server.Backend, error) {
+	// support /bucketname in connection string
+	connectionMatch := regexp.MustCompile(`(nats://.*)/(.*)`)
+	bucketName := kineBucket
+	if connectionMatch.MatchString(connection) {
+		matches := connectionMatch.FindStringSubmatch(connection)
+		connection = matches[1]
+		bucketName = matches[2]
+		logrus.Infof("using bucket: %s", bucketName)
+	}
 	logrus.Infof("connecting to %s", connection)
+
 	conn, err := nats.Connect(connection)
 	if err != nil {
 		return nil, err
@@ -51,11 +61,11 @@ func New(ctx context.Context, connection string) (server.Backend, error) {
 		return nil, err
 	}
 
-	bucket, err := js.KeyValue(kineBucket)
+	bucket, err := js.KeyValue(bucketName)
 	if err != nil && err == nats.ErrBucketNotFound {
 		bucket, err = js.CreateKeyValue(
 			&nats.KeyValueConfig{
-				Bucket:      kineBucket,
+				Bucket:      bucketName,
 				Description: "Holds kine key/values",
 				History:     revHistory,
 			})
@@ -353,15 +363,16 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 	} else if revision != 0 {
 		rev = revision
 	}
-	//sort.Strings(keys)
 	var count int64 = 0
 	kvs := make([]*server.KeyValue, 0)
 	for _, key := range keys {
 		//if strings.HasPrefix(key, prefix) {
 		if count < limit || limit == 0 {
-			if _, entry, err := j.Get(ctx, key, 0); err == nil && entry != nil {
-				kvs = append(kvs, entry)
-				count++
+			if key >= startKey {
+				if _, entry, err := j.Get(ctx, key, 0); err == nil && entry != nil {
+					kvs = append(kvs, entry)
+					count++
+				}
 			}
 		} else {
 			break
@@ -390,17 +401,18 @@ func (j *Jetstream) list(ctx context.Context, prefix, startKey string, limit, re
 	} else if revision != 0 {
 		rev = revision
 	}
-	//sort.Strings(keys)
 	var count int64 = 0
 	events := make([]*server.Event, 0)
 	for _, key := range keys {
 		//if strings.HasPrefix(key, prefix) {
 		if count < limit || limit == 0 {
-			if _, entry, err := j.get(ctx, key, 0, false); err == nil && entry != nil {
-				//if !entry.Delete {
-				events = append(events, entry)
-				//}
-				count++
+			if key >= startKey {
+				if _, entry, err := j.get(ctx, key, 0, false); err == nil && entry != nil {
+					//if !entry.Delete {
+					events = append(events, entry)
+					//}
+					count++
+				}
 			}
 		} else {
 			break
@@ -550,15 +562,11 @@ func (j *Jetstream) Watch(ctx context.Context, key string, revision int64) <-cha
 
 // DbSize get the kineBucket size from JetStream.
 func (j *Jetstream) DbSize(ctx context.Context) (int64, error) {
-	keySize, err := j.bucketSize(ctx, kineBucket)
+	keySize, err := j.bucketSize(ctx, j.kvBucket.Bucket())
 	if err != nil {
 		return -1, err
 	}
-	ttlSize, err := j.bucketSize(ctx, kineTtlBucket)
-	if err != nil {
-		return -1, err
-	}
-	return keySize + ttlSize, nil
+	return keySize, nil
 }
 
 func (j *Jetstream) bucketSize(ctx context.Context, bucket string) (int64, error) {

@@ -25,13 +25,13 @@ import (
 )
 
 const (
-	KineSocket      = "unix://kine.sock"
-	SQLiteBackend   = "sqlite"
-	DQLiteBackend   = "dqlite"
-	ETCDBackend     = "etcd3"
+	KineSocket       = "unix://kine.sock"
+	SQLiteBackend    = "sqlite"
+	DQLiteBackend    = "dqlite"
+	ETCDBackend      = "etcd3"
 	JetStreamBackend = "jetstream"
-	MySQLBackend    = "mysql"
-	PostgresBackend = "postgres"
+	MySQLBackend     = "mysql"
+	PostgresBackend  = "postgres"
 )
 
 type Config struct {
@@ -236,6 +236,7 @@ func getKineStorageBackend(ctx context.Context, driver, dsn string, cfg Config) 
 	case MySQLBackend:
 		backend, err = mysql.New(ctx, dsn, cfg.BackendTLSConfig, cfg.ConnectionPoolConfig)
 	case JetStreamBackend:
+		/// TODO set to true?
 		leaderElect = false
 		backend, err = jetstream.New(ctx, dsn)
 	default:
