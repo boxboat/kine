@@ -360,56 +360,106 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 		return 0, nil, err
 	}
 
+	// getting list of keys matching prefix
+	keys, err := j.getKeys(ctx, prefix)
+
 	kvs := make([]*server.KeyValue, 0)
 	var count int64 = 0
 
-	// startkey listing so getting list of revisions of startKey matches after revision
+	// startkey provided so get max revision after the startKey matching the prefix
 	if startKey != "" {
-		logrus.Debugf("Listing startKey=%s revisions", startKey)
-		entries, err := j.kvBucket.History(startKey)
-		if err != nil {
-
-		}
-		for i := len(entries) - 1; i >= 0; i-- {
-			if count < limit || limit == 0 {
-				e := entries[i]
-				if int64(e.Revision()) <= revision {
-					if entry, err := decode(e); err == nil {
-						kvs = append(kvs, entry.KV)
-						break
-					}
+		var histories map[string][]nats.KeyValueEntry
+		var minRev int64 = 0
+		//var innerEntry nats.KeyValueEntry
+		if entries, err := j.kvBucket.History(startKey, nats.IgnoreDeletes()); err == nil {
+			histories[startKey] = entries
+			for i := len(entries) - 1; i >= 0; i-- {
+				// find the matching startKey
+				if int64(entries[i].Revision()) <= revision {
+					minRev = int64(entries[i].Revision())
+					break
 				}
-			} else {
-				break
 			}
-		}
-		return rev, kvs, nil
-
-	} else {
-		// getting list of keys
-		keys, err := j.getKeys(ctx, prefix)
-
-		if err != nil {
+		} else {
 			return 0, nil, err
 		}
 
+		for _, key := range keys {
+			if key != startKey {
+				if history, err := j.kvBucket.History(key, nats.IgnoreDeletes()); err == nil {
+					histories[key] = history
+				} else {
+					// TODO? should not happen
+					logrus.Warnf("no history for %s", key)
+				}
+			}
+		}
+		var nextRevId = minRev
+		var nextRevision nats.KeyValueEntry
+		for _, v := range histories {
+			for i := len(v) - 1; i >= 0; i-- {
+				if int64(v[i].Revision()) > nextRevId && int64(v[i].Revision()) <= revision {
+					nextRevId = int64(v[i].Revision())
+					nextRevision = v[i]
+					break
+				} else if int64(v[i].Revision()) <= nextRevId {
+					break
+				}
+			}
+		}
+		entry, err := decode(nextRevision)
+		if err != nil {
+			return 0, nil, err
+		}
+		kvs := append(kvs, entry.KV)
+
+		return rev, kvs, nil
+
+	} else {
+
+		current := true
 		if revision == 0 && len(keys) == 0 {
 			return rev, nil, nil
 		}
 
 		if revision != 0 {
 			rev = revision
+			current = false
 		}
 
-		for _, key := range keys {
-			if count < limit || limit == 0 {
-				if _, entry, err := j.Get(ctx, key, 0); err == nil && entry != nil {
-					kvs = append(kvs, entry)
-					count++
+		if current {
+			for _, key := range keys {
+				if count < limit || limit == 0 {
+					if _, entry, err := j.Get(ctx, key, 0); err == nil && entry != nil {
+						kvs = append(kvs, entry)
+						count++
+					}
+				} else {
+					break
 				}
-			} else {
-				break
 			}
+		} else {
+			for _, key := range keys {
+				if count < limit || limit == 0 {
+					if history, err := j.kvBucket.History(key, nats.IgnoreDeletes()); err == nil {
+						for i := len(history) - 1; i >= 0; i-- {
+							if int64(history[i].Revision()) <= revision {
+								if entry, err := decode(history[i]); err == nil {
+									kvs = append(kvs, entry.KV)
+									count++
+								} else {
+									logrus.Warnf("Could not decode")
+								}
+								break
+							}
+						}
+					} else {
+						// TODO? should not happen
+						logrus.Warnf("no history for %s", key)
+					}
+				}
+			}
+
 		}
 		return rev, kvs, nil
 	}
