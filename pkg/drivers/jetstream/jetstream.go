@@ -371,7 +371,7 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 		histories := make(map[string][]nats.KeyValueEntry)
 		var minRev int64 = 0
 		//var innerEntry nats.KeyValueEntry
-		if entries, err := j.kvBucket.History(startKey, nats.IgnoreDeletes()); err == nil {
+		if entries, err := j.kvBucket.History(startKey); err == nil {
 			histories[startKey] = entries
 			for i := len(entries) - 1; i >= 0; i-- {
 				// find the matching startKey
@@ -387,7 +387,7 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 
 		for _, key := range keys {
 			if key != startKey {
-				if history, err := j.kvBucket.History(key, nats.IgnoreDeletes()); err == nil {
+				if history, err := j.kvBucket.History(key); err == nil {
 					histories[key] = history
 				} else {
 					// TODO? should not happen
@@ -446,7 +446,7 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 		} else {
 			for _, key := range keys {
 				if count < limit || limit == 0 {
-					if history, err := j.kvBucket.History(key, nats.IgnoreDeletes()); err == nil {
+					if history, err := j.kvBucket.History(key); err == nil {
 						for i := len(history) - 1; i >= 0; i-- {
 							if int64(history[i].Revision()) <= revision {
 								if entry, err := decode(history[i]); err == nil {
