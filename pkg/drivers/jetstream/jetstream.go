@@ -407,11 +407,13 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 				}
 			}
 		}
-		entry, err := decode(nextRevision)
-		if err != nil {
-			return 0, nil, err
+		if nextRevision != nil {
+			entry, err := decode(nextRevision)
+			if err != nil {
+				return 0, nil, err
+			}
+			kvs = append(kvs, entry.KV)
 		}
-		kvs := append(kvs, entry.KV)
 
 		return rev, kvs, nil
 
