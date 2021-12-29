@@ -377,6 +377,7 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 				// find the matching startKey
 				if int64(entries[i].Revision()) <= revision {
 					minRev = int64(entries[i].Revision())
+					logrus.Debugf("Found min revision=%d for key=%s", minRev, startKey)
 					break
 				}
 			}
@@ -396,11 +397,13 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 		}
 		var nextRevId = minRev
 		var nextRevision nats.KeyValueEntry
-		for _, v := range histories {
+		for k, v := range histories {
+			logrus.Debugf("Checking %s history", k)
 			for i := len(v) - 1; i >= 0; i-- {
 				if int64(v[i].Revision()) > nextRevId && int64(v[i].Revision()) <= revision {
 					nextRevId = int64(v[i].Revision())
 					nextRevision = v[i]
+					logrus.Debugf("found next rev=%d", nextRevId)
 					break
 				} else if int64(v[i].Revision()) <= nextRevId {
 					break
