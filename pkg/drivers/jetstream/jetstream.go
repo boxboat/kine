@@ -470,39 +470,39 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 	}
 }
 
-//func (j *Jetstream) list(ctx context.Context, prefix, startKey string, limit, revision int64) (revRet int64, eventRet []*server.Event, errRet error) {
-//	logrus.Tracef("list %s, start=%s, limit=%d, rev=%d", prefix, startKey, limit, revision)
-//
-//	keys, err := j.getKeys(ctx, prefix)
-//
-//	if err != nil {
-//		return 0, nil, err
-//	}
-//
-//	rev, err := j.currentRevision()
-//	if err != nil {
-//		return 0, nil, err
-//	}
-//
-//	if revision == 0 && len(keys) == 0 {
-//		return rev, nil, nil
-//	} else if revision != 0 {
-//		rev = revision
-//	}
-//	var count int64 = 0
-//	events := make([]*server.Event, 0)
-//	for _, key := range keys {
-//		if count < limit || limit == 0 {
-//			if _, entry, err := j.get(ctx, key, 0, false); err == nil && entry != nil {
-//				events = append(events, entry)
-//				count++
-//			}
-//		} else {
-//			break
-//		}
-//	}
-//	return rev, events, nil
-//}
+func (j *Jetstream) list(ctx context.Context, prefix, startKey string, limit, revision int64) (revRet int64, eventRet []*server.Event, errRet error) {
+	logrus.Tracef("list %s, start=%s, limit=%d, rev=%d", prefix, startKey, limit, revision)
+
+	keys, err := j.getKeys(ctx, prefix)
+
+	if err != nil {
+		return 0, nil, err
+	}
+
+	rev, err := j.currentRevision()
+	if err != nil {
+		return 0, nil, err
+	}
+
+	if revision == 0 && len(keys) == 0 {
+		return rev, nil, nil
+	} else if revision != 0 {
+		rev = revision
+	}
+	var count int64 = 0
+	events := make([]*server.Event, 0)
+	for _, key := range keys {
+		if count < limit || limit == 0 {
+			if _, entry, err := j.get(ctx, key, 0, false); err == nil && entry != nil {
+				events = append(events, entry)
+				count++
+			}
+		} else {
+			break
+		}
+	}
+	return rev, events, nil
+}
 
 // Count returns an exact count of the number of matching keys and the current revision of the database
 func (j *Jetstream) Count(ctx context.Context, prefix string) (revRet int64, count int64, err error) {
@@ -596,12 +596,7 @@ func (j *Jetstream) Update(ctx context.Context, key string, value []byte, revisi
 func (j *Jetstream) Watch(ctx context.Context, prefix string, revision int64) <-chan []*server.Event {
 	logrus.Tracef("WATCH %s, rev=%d", prefix, revision)
 
-	//keys, err := j.getKeys(ctx, prefix)
-	//if err != nil {
-	//	logrus.Errorf("failed to get keys %s", prefix)
-	//}
-
-	//_, events, err := j.list(ctx, prefix, "", 0, 0)
+	_, events, err := j.list(ctx, prefix, "", 0, 0)
 
 	watcher, err := j.kvBucket.Watch(prefix, nats.IgnoreDeletes())
 
@@ -613,9 +608,9 @@ func (j *Jetstream) Watch(ctx context.Context, prefix string, revision int64) <-
 
 	go func() {
 
-		//if len(events) > 0 {
-		//	result <- events
-		//}
+		if len(events) > 0 {
+			result <- events
+		}
 
 		for {
 			select {
