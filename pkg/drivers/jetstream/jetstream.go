@@ -702,23 +702,26 @@ func (j *Jetstream) compactRevision() (int64, error) {
 }
 
 // getKeyValues returns a []nats.KeyValueEntry matching prefix
-func (j *Jetstream) getKeyValues(ctxt context.Context, prefix string) ([]nats.KeyValueEntry, error) {
+func (j *Jetstream) getKeyValues(ctx context.Context, prefix string) ([]nats.KeyValueEntry, error) {
 	logrus.Debugf("getKeyValues %s", prefix)
 
 	watcher, err := j.kvBucket.Watch(prefix, nats.IgnoreDeletes())
 	if err != nil {
 		return nil, err
 	}
-	defer watcher.Stop()
+	defer func(watcher nats.KeyWatcher) {
+		err := watcher.Stop()
+		if err != nil {
+			logrus.Warnf("failed to stop %s getKeyValues watcher")
+		}
+	}(watcher)
 
 	var entries []nats.KeyValueEntry
 	for entry := range watcher.Updates() {
 		if entry == nil {
 			break
 		}
-		if entry.Operation() != nats.KeyValueDelete || entry.Operation() != nats.KeyValuePurge {
-			entries = append(entries, entry)
-		}
+		entries = append(entries, entry)
 	}
 	return entries, nil
 }
@@ -731,7 +734,12 @@ func (j *Jetstream) getKeys(ctx context.Context, prefix string) ([]string, error
 	if err != nil {
 		return nil, err
 	}
-	defer watcher.Stop()
+	defer func(watcher nats.KeyWatcher) {
+		err := watcher.Stop()
+		if err != nil {
+			logrus.Warnf("failed to stop %s getKeys watcher", prefix)
+		}
+	}(watcher)
 
 	var keys []string
 	// grab all matching keys immediately
@@ -739,9 +747,7 @@ func (j *Jetstream) getKeys(ctx context.Context, prefix string) ([]string, error
 		if entry == nil {
 			break
 		}
-		if entry.Operation() != nats.KeyValueDelete || entry.Operation() != nats.KeyValuePurge {
-			keys = append(keys, entry.Key())
-		}
+		keys = append(keys, entry.Key())
 	}
 	return keys, nil
 

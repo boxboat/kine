@@ -155,10 +155,13 @@ def delete_configmap():
 def list_configmaps():
     if not configmaps:
         return
-    cml = v1.list_namespaced_config_map(namespace=namespace)
-    for cm in cml.items:
-        configmaps[cm.metadata.name] = cm
-
+    try:
+        cml = v1.list_namespaced_config_map(namespace=namespace)
+    except client.exceptions.ApiException as e:
+        print(e)
+    else:
+        for cm in cml.items:
+            configmaps[cm.metadata.name] = cm
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
