@@ -78,7 +78,7 @@ func New(ctx context.Context, connection string) (server.Backend, error) {
 			})
 	}
 
-	kvB := kv.NewEncodedKV(bucket, &kv.EtcdKeyCodec{}, &kv.PlainCodec{})
+	kvB := kv.NewEncodedKV(bucket, &kv.EtcdKeyCodec{}, &kv.S2ValueCodec{})
 
 	//kvB, err := js.KeyValue(kineBucket)
 	//if err != nil && err == nats.ErrBucketNotFound {
