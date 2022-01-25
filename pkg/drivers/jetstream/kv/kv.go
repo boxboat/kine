@@ -1,14 +1,17 @@
 package kv
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"time"
+
 	"github.com/nats-io/nats.go"
 	"github.com/sirupsen/logrus"
-	"time"
 )
 
-func NewEncodedKV(bucket nats.KeyValue, codec KeyCodec) nats.KeyValue {
-	return &encodedKV{bucket, codec}
+func NewEncodedKV(bucket nats.KeyValue, k KeyCodec, v ValueCodec) nats.KeyValue {
+	return &encodedKV{bucket, k, v}
 }
 
 type KeyCodec interface {
@@ -17,22 +20,30 @@ type KeyCodec interface {
 	EncodeRange(keys string) (string, error)
 }
 
+type ValueCodec interface {
+	Encode(src []byte, dst io.Writer) error
+	Decode(src io.Reader, dst io.Writer) error
+}
+
 type encodedKV struct {
-	bucket   nats.KeyValue
-	keyCodec KeyCodec
+	bucket     nats.KeyValue
+	keyCodec   KeyCodec
+	valueCodec ValueCodec
 }
 
 type watcher struct {
-	watcher  nats.KeyWatcher
-	keyCodec KeyCodec
-	updates  chan nats.KeyValueEntry
-	ctx      context.Context
-	cancel   context.CancelFunc
+	watcher    nats.KeyWatcher
+	keyCodec   KeyCodec
+	valueCodec ValueCodec
+	updates    chan nats.KeyValueEntry
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 type entry struct {
-	keyCodec KeyCodec
-	entry    nats.KeyValueEntry
+	keyCodec   KeyCodec
+	valueCodec ValueCodec
+	entry      nats.KeyValueEntry
 }
 
 func (e *entry) Key() string {
@@ -45,8 +56,14 @@ func (e *entry) Key() string {
 	return dk
 }
 
-func (e *entry) Bucket() string             { return e.entry.Bucket() }
-func (e *entry) Value() []byte              { return e.entry.Value() }
+func (e *entry) Bucket() string { return e.entry.Bucket() }
+func (e *entry) Value() []byte {
+	buf := new(bytes.Buffer)
+	if err := e.valueCodec.Decode(bytes.NewBuffer(e.entry.Value()), buf); err != nil {
+		// TODO abort?
+	}
+	return buf.Bytes()
+}
 func (e *entry) Revision() uint64           { return e.entry.Revision() }
 func (e *entry) Created() time.Time         { return e.entry.Created() }
 func (e *entry) Delta() uint64              { return e.entry.Delta() }
@@ -62,7 +79,7 @@ func (w *watcher) Stop() error {
 }
 
 func (e *encodedKV) newWatcher(w nats.KeyWatcher) nats.KeyWatcher {
-	watch := &watcher{watcher: w, keyCodec: e.keyCodec, updates: make(chan nats.KeyValueEntry, 32)}
+	watch := &watcher{watcher: w, keyCodec: e.keyCodec, valueCodec: e.valueCodec, updates: make(chan nats.KeyValueEntry, 32)}
 	watch.ctx, watch.cancel = context.WithCancel(context.Background())
 
 	go func() {
@@ -75,8 +92,9 @@ func (e *encodedKV) newWatcher(w nats.KeyWatcher) nats.KeyWatcher {
 				}
 
 				watch.updates <- &entry{
-					keyCodec: e.keyCodec,
-					entry:    ent,
+					keyCodec:   e.keyCodec,
+					valueCodec: e.valueCodec,
+					entry:      ent,
 				}
 			case <-watch.ctx.Done():
 				return
@@ -99,8 +117,9 @@ func (e *encodedKV) Get(key string) (nats.KeyValueEntry, error) {
 	}
 
 	return &entry{
-		keyCodec: e.keyCodec,
-		entry:    ent,
+		keyCodec:   e.keyCodec,
+		valueCodec: e.valueCodec,
+		entry:      ent,
 	}, nil
 }
 
@@ -110,7 +129,14 @@ func (e *encodedKV) Put(key string, value []byte) (revision uint64, err error) {
 		return 0, err
 	}
 
-	return e.bucket.Put(ek, value)
+	buf := new(bytes.Buffer)
+
+	err = e.valueCodec.Encode(value, buf)
+	if err != nil {
+		return 0, err
+	}
+
+	return e.bucket.Put(ek, buf.Bytes())
 }
 
 func (e *encodedKV) Create(key string, value []byte) (revision uint64, err error) {
@@ -119,7 +145,14 @@ func (e *encodedKV) Create(key string, value []byte) (revision uint64, err error
 		return 0, err
 	}
 
-	return e.bucket.Create(ek, value)
+	buf := new(bytes.Buffer)
+
+	err = e.valueCodec.Encode(value, buf)
+	if err != nil {
+		return 0, err
+	}
+
+	return e.bucket.Create(ek, buf.Bytes())
 }
 
 func (e *encodedKV) Update(key string, value []byte, last uint64) (revision uint64, err error) {
@@ -128,7 +161,14 @@ func (e *encodedKV) Update(key string, value []byte, last uint64) (revision uint
 		return 0, err
 	}
 
-	return e.bucket.Update(ek, value, last)
+	buf := new(bytes.Buffer)
+
+	err = e.valueCodec.Encode(value, buf)
+	if err != nil {
+		return 0, err
+	}
+
+	return e.bucket.Update(ek, buf.Bytes(), last)
 }
 
 func (e *encodedKV) Delete(key string) error {
@@ -177,7 +217,7 @@ func (e *encodedKV) History(key string, opts ...nats.WatchOpt) ([]nats.KeyValueE
 	}
 
 	for _, ent := range hist {
-		res = append(res, &entry{e.keyCodec, ent})
+		res = append(res, &entry{e.keyCodec, e.valueCodec, ent})
 	}
 
 	return res, nil

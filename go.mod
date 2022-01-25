@@ -6,6 +6,7 @@ require (
 	github.com/Rican7/retry v0.1.0
 	github.com/canonical/go-dqlite v1.5.1
 	github.com/go-sql-driver/mysql v1.6.0
+	github.com/klauspost/compress v1.14.1
 	github.com/lib/pq v1.10.2
 	github.com/mattn/go-sqlite3 v1.14.8
 	github.com/nats-io/nats-server/v2 v2.4.1-0.20210907200628-874c79fe411f // indirect
@@ -23,3 +24,5 @@ require (
 	go.etcd.io/etcd/server/v3 v3.5.0
 	google.golang.org/grpc v1.38.0
 )
+
+replace github.com/nats-io/nats.go => /Users/matthew.devenny/projects/nats-io/nats.go

@@ -2,30 +2,37 @@ package kv
 
 import (
 	"fmt"
+	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/nats.go"
 	"github.com/shengdoushi/base58"
+	"io"
+	"io/ioutil"
 	"strings"
 )
 
-// EtcdCodec turns keys like /this/is/a.test.key into Base58 encoded values split on `/`
-type EtcdCodec struct{}
+// EtcdKeyCodec turns keys like /this/is/a.test.key into Base58 encoded values split on `/`
+type EtcdKeyCodec struct{}
+
+type S2ValueCodec struct{}
+
+type PlainCodec struct{}
 
 var (
 	keyAlphabet = base58.BitcoinAlphabet
 )
 
-func (e *EtcdCodec) EncodeRange(keys string) (string, error) {
+func (e *EtcdKeyCodec) EncodeRange(keys string) (string, error) {
 	ek, err := e.Encode(keys)
 	if err != nil {
 		return "", err
 	}
-	if strings.HasSuffix(ek, "."){
+	if strings.HasSuffix(ek, ".") {
 		return fmt.Sprintf("%s>", ek), nil
 	}
 	return ek, nil
 }
 
-func (*EtcdCodec) Encode(key string) (retKey string, e error) {
+func (*EtcdKeyCodec) Encode(key string) (retKey string, e error) {
 	//defer func() {
 	//	logrus.Debugf("encoded %s => %s", key, retKey)
 	//}()
@@ -45,7 +52,7 @@ func (*EtcdCodec) Encode(key string) (retKey string, e error) {
 	return strings.Join(parts, "."), nil
 }
 
-func (*EtcdCodec) Decode(key string) (retKey string, e error) {
+func (*EtcdKeyCodec) Decode(key string) (retKey string, e error) {
 	//defer func() {
 	//	logrus.Debugf("decoded %s => %s", key, retKey)
 	//}()
@@ -61,4 +68,35 @@ func (*EtcdCodec) Decode(key string) (retKey string, e error) {
 		return "", nats.ErrInvalidKey
 	}
 	return fmt.Sprintf("/%s", strings.Join(parts, "/")), nil
+}
+
+func (*S2ValueCodec) Encode(src []byte, dst io.Writer) error {
+	enc := s2.NewWriter(dst)
+	err := enc.EncodeBuffer(src)
+	if err != nil {
+		enc.Close()
+		return err
+	}
+	return enc.Close()
+}
+
+func (*S2ValueCodec) Decode(src io.Reader, dst io.Writer) error {
+	dec := s2.NewReader(src)
+	_, err := io.Copy(dst, dec)
+	return err
+}
+
+func (*PlainCodec) Encode(src []byte, dst io.Writer) error {
+	_, err := dst.Write(src)
+	return err
+}
+
+func (*PlainCodec) Decode(src io.Reader, dst io.Writer) error {
+	b, err := ioutil.ReadAll(src)
+	if err != nil {
+		return err
+	}
+	_, err = dst.Write(b)
+
+	return err
 }

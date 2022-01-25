@@ -16,7 +16,7 @@ import (
 
 const (
 	kineBucket = "kine"
-	revHistory = 5
+	revHistory = 64
 	ttl        = 10 * time.Minute
 )
 
@@ -35,6 +35,13 @@ type keyWatcherCache struct {
 	timeout *time.Timer
 	keys    map[string]present
 	mutex   *sync.RWMutex
+}
+
+type JSValue struct {
+	KV           *server.KeyValue
+	PrevRevision int64
+	Create       bool
+	Delete       bool
 }
 
 // New get the JetStream Backend, establish connection to NATS JetStream.
@@ -71,7 +78,7 @@ func New(ctx context.Context, connection string) (server.Backend, error) {
 			})
 	}
 
-	kvB := kv.NewEncodedKV(bucket, &kv.EtcdCodec{})
+	kvB := kv.NewEncodedKV(bucket, &kv.EtcdKeyCodec{}, &kv.PlainCodec{})
 
 	//kvB, err := js.KeyValue(kineBucket)
 	//if err != nil && err == nats.ErrBucketNotFound {
@@ -136,15 +143,15 @@ func (j *Jetstream) Start(ctx context.Context) error {
 //	return j.isKeyExpired(ctx, entry.Created(), &val), err
 //}
 
-func (j *Jetstream) isKeyExpired(_ context.Context, createTime time.Time, event *server.Event) bool {
+func (j *Jetstream) isKeyExpired(_ context.Context, createTime time.Time, value *JSValue) bool {
 
 	requestTime := time.Now()
 	expired := false
-	if event.KV.Lease > 0 {
-		if requestTime.After(createTime.Add(time.Second * time.Duration(event.KV.Lease))) {
+	if value.KV.Lease > 0 {
+		if requestTime.After(createTime.Add(time.Second * time.Duration(value.KV.Lease))) {
 			expired = true
-			if err := j.kvBucket.Delete(event.KV.Key); err != nil {
-				logrus.Warnf("problem deleting expired key=%s, error=%v", event.KV.Key, err)
+			if err := j.kvBucket.Delete(value.KV.Key); err != nil {
+				logrus.Warnf("problem deleting expired key=%s, error=%v", value.KV.Key, err)
 			}
 		}
 	}
@@ -168,11 +175,11 @@ func (j *Jetstream) Get(ctx context.Context, key string, revision int64) (revRet
 	if err != nil {
 		return currentRev, nil, err
 	}
-	if rev, event, err := j.get(ctx, key, revision, false); err == nil {
-		if event == nil {
+	if rev, kv, err := j.get(ctx, key, revision, false); err == nil {
+		if kv == nil {
 			return currentRev, nil, nil
 		}
-		return rev, event.KV, nil
+		return rev, kv.KV, nil
 	} else if err == nats.ErrKeyNotFound {
 		return currentRev, nil, nil
 	} else {
@@ -180,7 +187,7 @@ func (j *Jetstream) Get(ctx context.Context, key string, revision int64) (revRet
 	}
 }
 
-func (j *Jetstream) get(ctx context.Context, key string, revision int64, includeDeletes bool) (int64, *server.Event, error) {
+func (j *Jetstream) get(ctx context.Context, key string, revision int64, includeDeletes bool) (int64, *JSValue, error) {
 	logrus.Tracef("get %s, revision=%d, includeDeletes=%v", key, revision, includeDeletes)
 
 	// Get latest revision
@@ -208,7 +215,7 @@ func (j *Jetstream) get(ctx context.Context, key string, revision int64, include
 	}
 
 	// Find a particular version
-	entries, err := j.kvBucket.History(key)
+	entries, err := j.kvBucket.History(key, nats.Context(ctx))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -242,18 +249,15 @@ func (j *Jetstream) Create(ctx context.Context, key string, value []byte, lease 
 	defer j.kvBucketMutex.Unlock()
 
 	// check if key exists already
-	rev, prevEvent, err := j.get(ctx, key, 0, true)
+	rev, prevKV, err := j.get(ctx, key, 0, true)
 	if err != nil && err != nats.ErrKeyNotFound {
 		return 0, err
 	}
 
-	if prevEvent != nil && !prevEvent.Delete {
-		return 0, server.ErrKeyExists
-	}
-
-	createEvent := server.Event{
-		Delete: false,
-		Create: true,
+	createValue := JSValue{
+		Delete:       false,
+		Create:       true,
+		PrevRevision: rev,
 		KV: &server.KeyValue{
 			Key:            key,
 			CreateRevision: 0,
@@ -261,20 +265,21 @@ func (j *Jetstream) Create(ctx context.Context, key string, value []byte, lease 
 			Value:          value,
 			Lease:          lease,
 		},
-		PrevKV: &server.KeyValue{
-			ModRevision: rev,
-		},
-	}
-	if prevEvent != nil {
-		createEvent.PrevKV = prevEvent.KV
 	}
 
-	event, err := encode(createEvent)
+	if prevKV != nil {
+		if !prevKV.Delete {
+			return 0, server.ErrKeyExists
+		}
+		createValue.PrevRevision = prevKV.KV.ModRevision
+	}
+
+	event, err := encode(createValue)
 	if err != nil {
 		return 0, err
 	}
 
-	if prevEvent != nil {
+	if prevKV != nil {
 		seq, err := j.kvBucket.Put(key, event)
 		if err != nil {
 			return 0, err
@@ -298,7 +303,7 @@ func (j *Jetstream) Delete(ctx context.Context, key string, revision int64) (rev
 	j.kvBucketMutex.Lock()
 	defer j.kvBucketMutex.Unlock()
 
-	rev, event, err := j.get(ctx, key, 0, true)
+	rev, value, err := j.get(ctx, key, 0, true)
 	if err != nil {
 		if err == nats.ErrKeyNotFound {
 			return rev, nil, true, nil
@@ -307,22 +312,22 @@ func (j *Jetstream) Delete(ctx context.Context, key string, revision int64) (rev
 		}
 	}
 
-	if event == nil {
+	if value == nil {
 		return rev, nil, true, nil
 	}
 
-	if event.Delete {
-		return rev, event.KV, true, nil
+	if value.Delete {
+		return rev, value.KV, true, nil
 	}
 
-	if revision != 0 && event.KV.ModRevision != revision {
-		return rev, event.KV, false, nil
+	if revision != 0 && value.KV.ModRevision != revision {
+		return rev, value.KV, false, nil
 	}
 
-	deleteEvent := server.Event{
-		Delete: true,
-		KV:     event.KV,
-		PrevKV: event.KV,
+	deleteEvent := JSValue{
+		Delete:       true,
+		PrevRevision: rev,
+		KV:           value.KV,
 	}
 	deleteEventBytes, err := encode(deleteEvent)
 	if err != nil {
@@ -331,15 +336,15 @@ func (j *Jetstream) Delete(ctx context.Context, key string, revision int64) (rev
 
 	deleteRev, err := j.kvBucket.Put(key, deleteEventBytes)
 	if err != nil {
-		return rev, event.KV, false, nil
+		return rev, value.KV, false, nil
 	}
 
 	err = j.kvBucket.Delete(key)
 	if err != nil {
-		return rev, event.KV, false, nil
+		return rev, value.KV, false, nil
 	}
 
-	return int64(deleteRev), event.KV, true, nil
+	return int64(deleteRev), value.KV, true, nil
 }
 
 func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, revision int64) (revRet int64, kvRet []*server.KeyValue, errRet error) {
@@ -368,7 +373,7 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 		histories := make(map[string][]nats.KeyValueEntry)
 		var minRev int64 = 0
 		//var innerEntry nats.KeyValueEntry
-		if entries, err := j.kvBucket.History(startKey); err == nil {
+		if entries, err := j.kvBucket.History(startKey, nats.Context(ctx)); err == nil {
 			histories[startKey] = entries
 			for i := len(entries) - 1; i >= 0; i-- {
 				// find the matching startKey
@@ -389,7 +394,7 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 
 		for _, key := range keys {
 			if key != startKey {
-				if history, err := j.kvBucket.History(key); err == nil {
+				if history, err := j.kvBucket.History(key, nats.Context(ctx)); err == nil {
 					histories[key] = history
 				} else {
 					// TODO? should not happen
@@ -460,7 +465,7 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 
 			for _, key := range keys {
 				if count < limit || limit == 0 {
-					if history, err := j.kvBucket.History(key); err == nil {
+					if history, err := j.kvBucket.History(key, nats.Context(ctx)); err == nil {
 						for i := len(history) - 1; i >= 0; i-- {
 							if int64(history[i].Revision()) <= revision {
 								if entry, err := decode(history[i]); err == nil {
@@ -484,8 +489,8 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 	}
 }
 
-func (j *Jetstream) list(ctx context.Context, prefix string) (revRet int64, eventRet []*server.Event, errRet error) {
-	logrus.Tracef("list %s, start=%s, limit=%d, rev=%d")
+func (j *Jetstream) listAfter(ctx context.Context, prefix string, revision int64) (revRet int64, eventRet []*server.Event, errRet error) {
+	logrus.Tracef("listAfter %s, start=%s, limit=%d, rev=%d")
 
 	entries, err := j.getKeyValues(ctx, prefix)
 
@@ -497,11 +502,25 @@ func (j *Jetstream) list(ctx context.Context, prefix string) (revRet int64, even
 	if err != nil {
 		return 0, nil, err
 	}
+	if revision != 0 {
+		rev = revision
+	}
 	events := make([]*server.Event, 0)
 	for _, e := range entries {
 		kv, err := decode(e)
-		if err == nil {
-			events = append(events, &kv)
+		if err == nil && int64(e.Revision()) > revision {
+			event := server.Event{
+				Delete: kv.Delete,
+				Create: kv.Create,
+				KV:     kv.KV,
+				PrevKV: &server.KeyValue{},
+			}
+			// TODO is this going to be slow?
+			if _, prevKV, err := j.Get(ctx, kv.KV.Key, kv.PrevRevision); err == nil && prevKV != nil {
+				event.PrevKV = prevKV
+			}
+
+			events = append(events, &event)
 		}
 	}
 	return rev, events, nil
@@ -545,7 +564,7 @@ func (j *Jetstream) Update(ctx context.Context, key string, value []byte, revisi
 	j.kvBucketMutex.Lock()
 	defer j.kvBucketMutex.Unlock()
 
-	rev, event, err := j.get(ctx, key, 0, false)
+	rev, prevKV, err := j.get(ctx, key, 0, false)
 
 	if err != nil {
 		if err == nats.ErrKeyNotFound {
@@ -555,51 +574,119 @@ func (j *Jetstream) Update(ctx context.Context, key string, value []byte, revisi
 		}
 	}
 
-	if event == nil {
+	if prevKV == nil {
 		return 0, nil, false, nil
 	}
 
-	if event.KV.ModRevision != revision {
-		return rev, event.KV, false, nil
+	if prevKV.KV.ModRevision != revision {
+		return rev, prevKV.KV, false, nil
 	}
 
-	updateEvent := server.Event{
-		Delete: false,
-		Create: false,
+	updateValue := JSValue{
+		Delete:       false,
+		Create:       false,
+		PrevRevision: prevKV.KV.ModRevision,
 		KV: &server.KeyValue{
 			Key:            key,
-			CreateRevision: event.KV.CreateRevision,
+			CreateRevision: prevKV.KV.CreateRevision,
 			Value:          value,
 			Lease:          lease,
 		},
-		PrevKV: event.KV,
 	}
-	if event.KV.CreateRevision == 0 {
-		updateEvent.KV.CreateRevision = rev
+	if prevKV.KV.CreateRevision == 0 {
+		updateValue.KV.CreateRevision = rev
 	}
 
-	eventBytes, err := encode(updateEvent)
+	valueBytes, err := encode(updateValue)
 	if err != nil {
 		return 0, nil, false, err
 	}
 
-	seq, err := j.kvBucket.Put(key, eventBytes)
+	seq, err := j.kvBucket.Put(key, valueBytes)
 	if err != nil {
 		return 0, nil, false, err
 	}
 
-	event.KV.ModRevision = int64(seq)
+	updateValue.KV.ModRevision = int64(seq)
 
-	return int64(seq), event.KV, true, err
+	return int64(seq), updateValue.KV, true, err
 
 }
 
 func (j *Jetstream) Watch(ctx context.Context, prefix string, revision int64) <-chan []*server.Event {
+	//logrus.Tracef("WATCH %s, rev=%d", prefix, revision)
+	//
+	//watcher, err := j.kvBucket.Watch(prefix, nats.IgnoreDeletes())
+	//
+	//entries, err := j.getKeyValues(ctx, prefix)
+	//if revision > 0 {
+	//	revision--
+	//}
+	//kvs := make([]*server.Event, len(entries))
+	//for _, e := range entries {
+	//	if int64(e.Revision()) > revision {
+	//		event, err := decode(e)
+	//		if err == nil {
+	//			kvs = append(kvs, &event)
+	//		}
+	//	}
+	//}
+	//
+	////_, events, err := j.listAfter(ctx, prefix)
+	//
+	//if err != nil {
+	//	logrus.Errorf("failed to create watcher %s for revision %d", prefix, revision)
+	//}
+	//
+	//result := make(chan []*server.Event, 100)
+	//
+	//go func() {
+	//	//lastRevision := revision
+	//	//if len(kvs) > 0 {
+	//	//	lastRevision = kvs[len(kvs)-1].KV.ModRevision
+	//	//}
+	//
+	//	if len(kvs) > 0 {
+	//		result <- kvs
+	//	}
+	//	for {
+	//		select {
+	//		case i := <-watcher.Updates():
+	//			if i != nil {
+	//				logrus.Debugf("update %v", i.Key())
+	//				if int64(i.Revision()) > revision {
+	//					events := make([]*server.Event, 1)
+	//					event, err := decode(i)
+	//
+	//					if err == nil {
+	//						events[0] = &event
+	//						result <- events
+	//					} else {
+	//						logrus.Warnf("error decoding event %v", err)
+	//						continue
+	//					}
+	//				}
+	//			}
+	//		case <-ctx.Done():
+	//			if err := watcher.Stop(); err != nil {
+	//				logrus.Warnf("error stopping %s watcher: %v", prefix, err)
+	//			} else {
+	//				logrus.Debugf("stopped %s watcher", prefix)
+	//			}
+	//			return
+	//		}
+	//	}
+	//}()
+	//return result
+
 	logrus.Tracef("WATCH %s, rev=%d", prefix, revision)
 
-	_, events, err := j.list(ctx, prefix)
+	watcher, err := j.kvBucket.Watch(prefix, nats.IgnoreDeletes(), nats.Context(ctx))
 
-	watcher, err := j.kvBucket.Watch(prefix, nats.IgnoreDeletes())
+	if revision > 0 {
+		revision--
+	}
+	_, events, err := j.listAfter(ctx, prefix, revision)
 
 	if err != nil {
 		logrus.Errorf("failed to create watcher %s for revision %d", prefix, revision)
@@ -611,24 +698,35 @@ func (j *Jetstream) Watch(ctx context.Context, prefix string, revision int64) <-
 
 		if len(events) > 0 {
 			result <- events
+			revision = events[len(events)-1].KV.ModRevision
 		}
 
 		for {
 			select {
 			case i := <-watcher.Updates():
 				if i != nil {
-					logrus.Debugf("update %v", i.Key())
-					events := make([]*server.Event, 1)
-					event, err := decode(i)
+					if int64(i.Revision()) > revision {
+						logrus.Debugf("update %v", i.Key())
+						events := make([]*server.Event, 1)
+						value, err := decode(i)
 
-					if err == nil {
-						events[0] = &event
-						result <- events
-					} else {
-						logrus.Warnf("error decoding event %v", err)
-						continue
+						if err == nil {
+							event := &server.Event{
+								Create: value.Create,
+								Delete: value.Delete,
+								KV:     value.KV,
+								PrevKV: &server.KeyValue{},
+							}
+							if _, prevKV, err := j.Get(ctx, value.KV.Key, value.PrevRevision); err == nil && prevKV != nil {
+								event.PrevKV = prevKV
+							}
+							events[0] = event
+							result <- events
+						} else {
+							logrus.Warnf("error decoding event %v", err)
+							continue
+						}
 					}
-
 				}
 			case <-ctx.Done():
 				if err := watcher.Stop(); err != nil {
@@ -664,25 +762,25 @@ func (j *Jetstream) bucketSize(ctx context.Context, bucket string) (int64, error
 	return int64(s.Size()), nil
 }
 
-func encode(event server.Event) ([]byte, error) {
-	buf, err := json.Marshal(event)
+func encode(v JSValue) ([]byte, error) {
+	buf, err := json.Marshal(v)
 	return buf, err
 }
 
-func decode(e nats.KeyValueEntry) (server.Event, error) {
-	event := server.Event{}
-	err := json.Unmarshal(e.Value(), &event)
-	if err != nil {
-		logrus.Debugf("key: %s", e.Key())
-		logrus.Debugf("sequence number: %d", e.Revision())
-		logrus.Debugf("bytes returned: %v", len(e.Value()))
-		return event, err
+func decode(e nats.KeyValueEntry) (JSValue, error) {
+	v := JSValue{}
+	if e.Value() != nil {
+		err := json.Unmarshal(e.Value(), &v)
+		if err != nil {
+			logrus.Debugf("key: %s", e.Key())
+			logrus.Debugf("sequence number: %d", e.Revision())
+			logrus.Debugf("bytes returned: %v", len(e.Value()))
+			return v, err
+		}
+		logrus.Debugf("Revising %s ModVersion=[%d]", e.Key(), e.Revision())
+		v.KV.ModRevision = int64(e.Revision())
 	}
-
-	if event.KV.ModRevision == 0 {
-		event.KV.ModRevision = int64(e.Revision())
-	}
-	return event, nil
+	return v, nil
 }
 
 func (j *Jetstream) currentRevision() (int64, error) {
@@ -704,8 +802,7 @@ func (j *Jetstream) compactRevision() (int64, error) {
 // getKeyValues returns a []nats.KeyValueEntry matching prefix
 func (j *Jetstream) getKeyValues(ctx context.Context, prefix string) ([]nats.KeyValueEntry, error) {
 	logrus.Debugf("getKeyValues %s", prefix)
-
-	watcher, err := j.kvBucket.Watch(prefix, nats.IgnoreDeletes())
+	watcher, err := j.kvBucket.Watch(prefix, nats.IgnoreDeletes(), nats.Context(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -726,11 +823,10 @@ func (j *Jetstream) getKeyValues(ctx context.Context, prefix string) ([]nats.Key
 	return entries, nil
 }
 
-// getKeys returns a list of keys matching a prefix
+// getKeys returns a listAfter of keys matching a prefix
 func (j *Jetstream) getKeys(ctx context.Context, prefix string) ([]string, error) {
 	logrus.Debugf("getKeys %s", prefix)
-
-	watcher, err := j.kvBucket.Watch(prefix, nats.MetaOnly(), nats.IgnoreDeletes())
+	watcher, err := j.kvBucket.Watch(prefix, nats.MetaOnly(), nats.IgnoreDeletes(), nats.Context(ctx))
 	if err != nil {
 		return nil, err
 	}
