@@ -24,5 +24,3 @@ require (
 	go.etcd.io/etcd/server/v3 v3.5.0
 	google.golang.org/grpc v1.38.0
 )
-
-replace github.com/nats-io/nats.go => /Users/matthew.devenny/projects/nats-io/nats.go
