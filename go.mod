@@ -9,8 +9,8 @@ require (
 	github.com/klauspost/compress v1.14.1
 	github.com/lib/pq v1.10.2
 	github.com/mattn/go-sqlite3 v1.14.8
-	github.com/nats-io/nats-server/v2 v2.4.1-0.20210907200628-874c79fe411f // indirect
-	github.com/nats-io/nats.go v1.13.1-0.20211215215833-e5a568955929
+	github.com/nats-io/nats-server/v2 v2.7.1 // indirect
+	github.com/nats-io/nats.go v1.13.1-0.20220121202836-972a071d373d
 	github.com/pkg/errors v0.9.1
 	github.com/rancher/wrangler v0.8.3
 	github.com/shengdoushi/base58 v1.0.0
