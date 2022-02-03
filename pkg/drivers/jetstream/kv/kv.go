@@ -11,7 +11,11 @@ import (
 )
 
 func NewEncodedKV(bucket nats.KeyValue, k KeyCodec, v ValueCodec) nats.KeyValue {
-	return &encodedKV{bucket, k, v}
+	return &EncodedKV{bucket: bucket, keyCodec: k, valueCodec: v}
+}
+
+type WatcherWithCtx interface {
+	WatchWithCtx(ctx context.Context, keys string, opts ...nats.WatchOpt) nats.KeyWatcher
 }
 
 type KeyCodec interface {
@@ -25,7 +29,8 @@ type ValueCodec interface {
 	Decode(src io.Reader, dst io.Writer) error
 }
 
-type encodedKV struct {
+type EncodedKV struct {
+	WatcherWithCtx
 	bucket     nats.KeyValue
 	keyCodec   KeyCodec
 	valueCodec ValueCodec
@@ -78,8 +83,45 @@ func (w *watcher) Stop() error {
 	return w.watcher.Stop()
 }
 
-func (e *encodedKV) newWatcher(w nats.KeyWatcher) nats.KeyWatcher {
-	watch := &watcher{watcher: w, keyCodec: e.keyCodec, valueCodec: e.valueCodec, updates: make(chan nats.KeyValueEntry, 32)}
+func (e *EncodedKV) newWatcherWithCtx(ctx context.Context, w nats.KeyWatcher) nats.KeyWatcher {
+	watch := &watcher{
+		watcher:    w,
+		keyCodec:   e.keyCodec,
+		valueCodec: e.valueCodec,
+		updates:    make(chan nats.KeyValueEntry, 32)}
+
+	watch.ctx, watch.cancel = context.WithCancel(ctx)
+
+	go func() {
+		for {
+			select {
+			case ent := <-w.Updates():
+				if ent == nil {
+					watch.updates <- nil
+					continue
+				}
+
+				watch.updates <- &entry{
+					keyCodec:   e.keyCodec,
+					valueCodec: e.valueCodec,
+					entry:      ent,
+				}
+			case <-watch.ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return watch
+}
+
+func (e *EncodedKV) newWatcher(w nats.KeyWatcher) nats.KeyWatcher {
+	watch := &watcher{
+		watcher:    w,
+		keyCodec:   e.keyCodec,
+		valueCodec: e.valueCodec,
+		updates:    make(chan nats.KeyValueEntry, 32)}
+
 	watch.ctx, watch.cancel = context.WithCancel(context.Background())
 
 	go func() {
@@ -105,7 +147,7 @@ func (e *encodedKV) newWatcher(w nats.KeyWatcher) nats.KeyWatcher {
 	return watch
 }
 
-func (e *encodedKV) Get(key string) (nats.KeyValueEntry, error) {
+func (e *EncodedKV) Get(key string) (nats.KeyValueEntry, error) {
 	ek, err := e.keyCodec.Encode(key)
 	if err != nil {
 		return nil, err
@@ -123,7 +165,7 @@ func (e *encodedKV) Get(key string) (nats.KeyValueEntry, error) {
 	}, nil
 }
 
-func (e *encodedKV) Put(key string, value []byte) (revision uint64, err error) {
+func (e *EncodedKV) Put(key string, value []byte) (revision uint64, err error) {
 	ek, err := e.keyCodec.Encode(key)
 	if err != nil {
 		return 0, err
@@ -139,7 +181,7 @@ func (e *encodedKV) Put(key string, value []byte) (revision uint64, err error) {
 	return e.bucket.Put(ek, buf.Bytes())
 }
 
-func (e *encodedKV) Create(key string, value []byte) (revision uint64, err error) {
+func (e *EncodedKV) Create(key string, value []byte) (revision uint64, err error) {
 	ek, err := e.keyCodec.Encode(key)
 	if err != nil {
 		return 0, err
@@ -155,7 +197,7 @@ func (e *encodedKV) Create(key string, value []byte) (revision uint64, err error
 	return e.bucket.Create(ek, buf.Bytes())
 }
 
-func (e *encodedKV) Update(key string, value []byte, last uint64) (revision uint64, err error) {
+func (e *EncodedKV) Update(key string, value []byte, last uint64) (revision uint64, err error) {
 	ek, err := e.keyCodec.Encode(key)
 	if err != nil {
 		return 0, err
@@ -171,7 +213,7 @@ func (e *encodedKV) Update(key string, value []byte, last uint64) (revision uint
 	return e.bucket.Update(ek, buf.Bytes(), last)
 }
 
-func (e *encodedKV) Delete(key string) error {
+func (e *EncodedKV) Delete(key string) error {
 	ek, err := e.keyCodec.Encode(key)
 	if err != nil {
 		return err
@@ -180,7 +222,7 @@ func (e *encodedKV) Delete(key string) error {
 	return e.bucket.Delete(ek)
 }
 
-func (e *encodedKV) Purge(key string) error {
+func (e *EncodedKV) Purge(key string) error {
 	ek, err := e.keyCodec.Encode(key)
 	if err != nil {
 		return err
@@ -188,8 +230,23 @@ func (e *encodedKV) Purge(key string) error {
 
 	return e.bucket.Purge(ek)
 }
+func (e *EncodedKV) WatchWithCtx(ctx context.Context, keys string, opts ...nats.WatchOpt) (nats.KeyWatcher, error) {
+	opts = append(opts, nats.Context(ctx))
+	ek, err := e.keyCodec.EncodeRange(keys)
+	logrus.Debugf("watching [%s]", ek)
+	if err != nil {
+		return nil, err
+	}
 
-func (e *encodedKV) Watch(keys string, opts ...nats.WatchOpt) (nats.KeyWatcher, error) {
+	nw, err := e.bucket.Watch(ek, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return e.newWatcherWithCtx(ctx, nw), err
+}
+
+func (e *EncodedKV) Watch(keys string, opts ...nats.WatchOpt) (nats.KeyWatcher, error) {
 	ek, err := e.keyCodec.EncodeRange(keys)
 	logrus.Debugf("watching [%s]", ek)
 	if err != nil {
@@ -204,7 +261,7 @@ func (e *encodedKV) Watch(keys string, opts ...nats.WatchOpt) (nats.KeyWatcher, 
 	return e.newWatcher(nw), err
 }
 
-func (e *encodedKV) History(key string, opts ...nats.WatchOpt) ([]nats.KeyValueEntry, error) {
+func (e *EncodedKV) History(key string, opts ...nats.WatchOpt) ([]nats.KeyValueEntry, error) {
 	ek, err := e.keyCodec.Encode(key)
 	if err != nil {
 		return nil, err
@@ -223,13 +280,13 @@ func (e *encodedKV) History(key string, opts ...nats.WatchOpt) ([]nats.KeyValueE
 	return res, nil
 }
 
-func (e *encodedKV) PutString(key string, value string) (revision uint64, err error) {
+func (e *EncodedKV) PutString(key string, value string) (revision uint64, err error) {
 	return e.Put(key, []byte(value))
 }
-func (e *encodedKV) WatchAll(opts ...nats.WatchOpt) (nats.KeyWatcher, error) {
+func (e *EncodedKV) WatchAll(opts ...nats.WatchOpt) (nats.KeyWatcher, error) {
 	return e.bucket.WatchAll(opts...)
 }
-func (e *encodedKV) Keys(opts ...nats.WatchOpt) ([]string, error) {
+func (e *EncodedKV) Keys(opts ...nats.WatchOpt) ([]string, error) {
 	keys, err := e.bucket.Keys(opts...)
 	if err != nil {
 		return nil, err
@@ -247,6 +304,6 @@ func (e *encodedKV) Keys(opts ...nats.WatchOpt) ([]string, error) {
 	return res, nil
 }
 
-func (e *encodedKV) Bucket() string                           { return e.bucket.Bucket() }
-func (e *encodedKV) PurgeDeletes(opts ...nats.WatchOpt) error { return e.bucket.PurgeDeletes(opts...) }
-func (e *encodedKV) Status() (nats.KeyValueStatus, error)     { return e.bucket.Status() }
+func (e *EncodedKV) Bucket() string                           { return e.bucket.Bucket() }
+func (e *EncodedKV) PurgeDeletes(opts ...nats.WatchOpt) error { return e.bucket.PurgeDeletes(opts...) }
+func (e *EncodedKV) Status() (nats.KeyValueStatus, error)     { return e.bucket.Status() }

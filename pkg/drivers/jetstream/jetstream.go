@@ -3,15 +3,15 @@ package jetstream
 import (
 	"context"
 	"encoding/json"
-	"github.com/k3s-io/kine/pkg/drivers/jetstream/kv"
-	"github.com/sirupsen/logrus"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/k3s-io/kine/pkg/drivers/jetstream/kv"
 	"github.com/k3s-io/kine/pkg/server"
 	"github.com/nats-io/nats.go"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -681,7 +681,7 @@ func (j *Jetstream) Watch(ctx context.Context, prefix string, revision int64) <-
 
 	logrus.Tracef("WATCH %s, rev=%d", prefix, revision)
 
-	watcher, err := j.kvBucket.Watch(prefix, nats.IgnoreDeletes(), nats.Context(ctx))
+	watcher, err := j.kvBucket.(*kv.EncodedKV).WatchWithCtx(ctx, prefix, nats.IgnoreDeletes())
 
 	if revision > 0 {
 		revision--
@@ -708,6 +708,12 @@ func (j *Jetstream) Watch(ctx context.Context, prefix string, revision int64) <-
 					if int64(i.Revision()) > revision {
 						logrus.Debugf("update %v", i.Key())
 						events := make([]*server.Event, 1)
+
+						if i.Operation() == nats.KeyValueDelete {
+
+						} else {
+
+						}
 						value, err := decode(i)
 
 						if err == nil {
@@ -802,14 +808,14 @@ func (j *Jetstream) compactRevision() (int64, error) {
 // getKeyValues returns a []nats.KeyValueEntry matching prefix
 func (j *Jetstream) getKeyValues(ctx context.Context, prefix string) ([]nats.KeyValueEntry, error) {
 	logrus.Debugf("getKeyValues %s", prefix)
-	watcher, err := j.kvBucket.Watch(prefix, nats.IgnoreDeletes(), nats.Context(ctx))
+	watcher, err := j.kvBucket.(*kv.EncodedKV).WatchWithCtx(ctx, prefix, nats.IgnoreDeletes())
 	if err != nil {
 		return nil, err
 	}
 	defer func(watcher nats.KeyWatcher) {
 		err := watcher.Stop()
 		if err != nil {
-			logrus.Warnf("failed to stop %s getKeyValues watcher")
+			logrus.Warnf("failed to stop %s getKeyValues watcher", prefix)
 		}
 	}(watcher)
 
@@ -826,7 +832,7 @@ func (j *Jetstream) getKeyValues(ctx context.Context, prefix string) ([]nats.Key
 // getKeys returns a listAfter of keys matching a prefix
 func (j *Jetstream) getKeys(ctx context.Context, prefix string) ([]string, error) {
 	logrus.Debugf("getKeys %s", prefix)
-	watcher, err := j.kvBucket.Watch(prefix, nats.MetaOnly(), nats.IgnoreDeletes(), nats.Context(ctx))
+	watcher, err := j.kvBucket.(*kv.EncodedKV).WatchWithCtx(ctx, prefix, nats.MetaOnly(), nats.IgnoreDeletes())
 	if err != nil {
 		return nil, err
 	}
