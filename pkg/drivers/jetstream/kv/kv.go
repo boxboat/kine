@@ -45,6 +45,13 @@ type watcher struct {
 	cancel     context.CancelFunc
 }
 
+func (w *watcher) Context() context.Context {
+	if w == nil {
+		return nil
+	}
+	return w.ctx
+}
+
 type entry struct {
 	keyCodec   KeyCodec
 	valueCodec ValueCodec
@@ -122,7 +129,11 @@ func (e *EncodedKV) newWatcher(w nats.KeyWatcher) nats.KeyWatcher {
 		valueCodec: e.valueCodec,
 		updates:    make(chan nats.KeyValueEntry, 32)}
 
+	//if w.Context() == nil {
 	watch.ctx, watch.cancel = context.WithCancel(context.Background())
+	//} else {
+	//	watch.ctx, watch.cancel = context.WithCancel(w.Context())
+	//}
 
 	go func() {
 		for {
@@ -154,6 +165,24 @@ func (e *EncodedKV) Get(key string) (nats.KeyValueEntry, error) {
 	}
 
 	ent, err := e.bucket.Get(ek)
+	if err != nil {
+		return nil, err
+	}
+
+	return &entry{
+		keyCodec:   e.keyCodec,
+		valueCodec: e.valueCodec,
+		entry:      ent,
+	}, nil
+}
+
+func (e *EncodedKV) GetRevision(key string, revision uint64) (nats.KeyValueEntry, error) {
+	ek, err := e.keyCodec.Encode(key)
+	if err != nil {
+		return nil, err
+	}
+
+	ent, err := e.bucket.GetRevision(ek, revision)
 	if err != nil {
 		return nil, err
 	}
