@@ -202,7 +202,7 @@ func (j *Jetstream) get(ctx context.Context, key string, revision int64, include
 			}
 
 			if val.Delete && !includeDeletes {
-				return 0, nil, nil
+				return 0, nil, nats.ErrKeyNotFound
 			}
 
 			if j.isKeyExpired(ctx, entry.Created(), &val) {
