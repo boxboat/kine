@@ -16,14 +16,21 @@ import (
 )
 
 const (
-	kineBucket = "kine"
-	revHistory = 12
+	kineBucket  = "kine"
+	revHistory  = 12
+	kSlowMethod = 500
+)
+
+var (
+	directoryMatch = regexp.MustCompile(`/registry/(.*)/.*`)
 )
 
 type Jetstream struct {
-	kvBucket      nats.KeyValue
-	kvBucketMutex *sync.RWMutex
-	jetStream     nats.JetStreamContext
+	kvBucket         nats.KeyValue
+	kvBucketMutex    *sync.RWMutex
+	kvDirectoryMutex *sync.RWMutex
+	kvDirectoryMuxes map[string]*sync.RWMutex
+	jetStream        nats.JetStreamContext
 	server.Backend
 }
 
@@ -101,9 +108,11 @@ func New(ctx context.Context, connection string) (server.Backend, error) {
 	//}
 
 	return &Jetstream{
-		kvBucket:      kvB,
-		kvBucketMutex: &sync.RWMutex{},
-		jetStream:     js,
+		kvBucket:         kvB,
+		kvBucketMutex:    &sync.RWMutex{},
+		kvDirectoryMutex: &sync.RWMutex{},
+		kvDirectoryMuxes: make(map[string]*sync.RWMutex),
+		jetStream:        js,
 	}, nil
 }
 
@@ -135,12 +144,19 @@ func (j *Jetstream) isKeyExpired(_ context.Context, createTime time.Time, value 
 
 // Get returns the associated server.KeyValue
 func (j *Jetstream) Get(ctx context.Context, key string, revision int64) (revRet int64, kvRet *server.KeyValue, errRet error) {
-	logrus.Tracef("GET %s, rev=%d", key, revision)
+	//logrus.Tracef("GET %s, rev=%d", key, revision)
+	start := time.Now()
 	defer func() {
+		duration := time.Duration(time.Now().Nanosecond() - start.Nanosecond())
+		size := 0
 		if kvRet != nil {
-			logrus.Tracef("GET %s, rev=%d => revRet=%d, kv=%v, size=%d, err=%v", key, revision, revRet, kvRet != nil, len(kvRet.Value), errRet)
+			size = len(kvRet.Value)
+		}
+		fStr := "GET %s, rev=%d => revRet=%d, kv=%v, size=%d, err=%v, duration=%d"
+		if duration.Milliseconds() > kSlowMethod {
+			logrus.Warnf(fStr, key, revision, revRet, kvRet != nil, size, errRet, duration.Milliseconds())
 		} else {
-			logrus.Tracef("GET %s, rev=%d => revRet=%d, kv=%v, err=%v", key, revision, revRet, kvRet != nil, errRet)
+			logrus.Tracef(fStr, key, revision, revRet, kvRet != nil, size, errRet, duration.Milliseconds())
 		}
 	}()
 
@@ -162,7 +178,7 @@ func (j *Jetstream) Get(ctx context.Context, key string, revision int64) (revRet
 }
 
 func (j *Jetstream) get(ctx context.Context, key string, revision int64, includeDeletes bool) (int64, *JSValue, error) {
-	logrus.Tracef("get %s, revision=%d, includeDeletes=%v", key, revision, includeDeletes)
+	//logrus.Tracef("get %s, revision=%d, includeDeletes=%v", key, revision, includeDeletes)
 
 	compactRev, err := j.compactRevision()
 	if err != nil {
@@ -179,7 +195,7 @@ func (j *Jetstream) get(ctx context.Context, key string, revision int64, include
 			}
 
 			if val.Delete && !includeDeletes {
-				return 0, nil, nil
+				return 0, nil, nats.ErrKeyNotFound
 			}
 
 			if j.isKeyExpired(ctx, entry.Created(), &val) {
@@ -219,13 +235,30 @@ func (j *Jetstream) get(ctx context.Context, key string, revision int64, include
 
 // Create
 func (j *Jetstream) Create(ctx context.Context, key string, value []byte, lease int64) (revRet int64, errRet error) {
-	logrus.Tracef("CREATE %s, size=%d, lease=%d", key, len(value), lease)
+	//logrus.Tracef("CREATE %s, size=%d, lease=%d", key, len(value), lease)
+	start := time.Now()
 	defer func() {
-		logrus.Tracef("CREATE %s, size=%d, lease=%d => rev=%d, err=%v", key, len(value), lease, revRet, errRet)
+		duration := time.Duration(time.Now().Nanosecond() - start.Nanosecond())
+		fStr := "CREATE %s, size=%d, lease=%d => rev=%d, err=%v, duration=%d"
+		if duration.Milliseconds() > kSlowMethod {
+			logrus.Warnf(fStr, key, len(value), lease, revRet, errRet, duration.Milliseconds())
+		} else {
+			logrus.Tracef(fStr, key, len(value), lease, revRet, errRet, duration.Milliseconds())
+		}
 	}()
 
-	j.kvBucketMutex.Lock()
-	defer j.kvBucketMutex.Unlock()
+	lockFolder := getFolder(key)
+	if lockFolder != "" {
+		j.kvDirectoryMutex.Lock()
+		if _, ok := j.kvDirectoryMuxes[lockFolder]; !ok {
+			j.kvDirectoryMuxes[lockFolder] = &sync.RWMutex{}
+		}
+		j.kvDirectoryMutex.Unlock()
+		j.kvDirectoryMuxes[lockFolder].Lock()
+		defer j.kvDirectoryMuxes[lockFolder].Unlock()
+	}
+	//j.kvBucketMutex.Lock()
+	//defer j.kvBucketMutex.Unlock()
 
 	// check if key exists already
 	rev, prevKV, err := j.get(ctx, key, 0, true)
@@ -274,13 +307,29 @@ func (j *Jetstream) Create(ctx context.Context, key string, value []byte, lease 
 }
 
 func (j *Jetstream) Delete(ctx context.Context, key string, revision int64) (revRet int64, kvRet *server.KeyValue, deletedRet bool, errRet error) {
-	logrus.Tracef("DELETE %s, rev=%d", key, revision)
+	//logrus.Tracef("DELETE %s, rev=%d", key, revision)
+	start := time.Now()
 	defer func() {
-		logrus.Tracef("DELETE %s, rev=%d => rev=%d, kv=%v, deleted=%v, err=%v", key, revision, revRet, kvRet != nil, deletedRet, errRet)
+		duration := time.Duration(time.Now().Nanosecond() - start.Nanosecond())
+		fStr := "DELETE %s, rev=%d => rev=%d, kv=%v, deleted=%v, err=%v, duration=%d"
+		if duration.Milliseconds() > kSlowMethod {
+			logrus.Warnf(fStr, key, revision, revRet, kvRet != nil, deletedRet, errRet, duration.Milliseconds())
+		} else {
+			logrus.Tracef(fStr, key, revision, revRet, kvRet != nil, deletedRet, errRet, duration.Milliseconds())
+		}
 	}()
-
-	j.kvBucketMutex.Lock()
-	defer j.kvBucketMutex.Unlock()
+	lockFolder := getFolder(key)
+	if lockFolder != "" {
+		j.kvDirectoryMutex.Lock()
+		if _, ok := j.kvDirectoryMuxes[lockFolder]; !ok {
+			j.kvDirectoryMuxes[lockFolder] = &sync.RWMutex{}
+		}
+		j.kvDirectoryMutex.Unlock()
+		j.kvDirectoryMuxes[lockFolder].Lock()
+		defer j.kvDirectoryMuxes[lockFolder].Unlock()
+	}
+	//j.kvBucketMutex.Lock()
+	//defer j.kvBucketMutex.Unlock()
 
 	rev, value, err := j.get(ctx, key, 0, true)
 	if err != nil {
@@ -333,9 +382,16 @@ func (j *Jetstream) Delete(ctx context.Context, key string, revision int64) (rev
 }
 
 func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, revision int64) (revRet int64, kvRet []*server.KeyValue, errRet error) {
-	logrus.Tracef("LIST %s, start=%s, limit=%d, rev=%d", prefix, startKey, limit, revision)
+	//logrus.Tracef("LIST %s, start=%s, limit=%d, rev=%d", prefix, startKey, limit, revision)
+	start := time.Now()
 	defer func() {
-		logrus.Tracef("LIST %s, start=%s, limit=%d, rev=%d => rev=%d, kvs=%d, err=%v", prefix, startKey, limit, revision, revRet, len(kvRet), errRet)
+		duration := time.Duration(time.Now().Nanosecond() - start.Nanosecond())
+		fStr := "LIST %s, start=%s, limit=%d, rev=%d => rev=%d, kvs=%d, err=%v, duration=%d"
+		if duration.Milliseconds() > kSlowMethod {
+			logrus.Warnf(fStr, prefix, startKey, limit, revision, revRet, len(kvRet), errRet, duration.Milliseconds())
+		} else {
+			logrus.Tracef(fStr, prefix, startKey, limit, revision, revRet, len(kvRet), errRet, duration.Milliseconds())
+		}
 	}()
 
 	// its assumed that when there is a start key that that key exists.
@@ -475,7 +531,7 @@ func (j *Jetstream) List(ctx context.Context, prefix, startKey string, limit, re
 }
 
 func (j *Jetstream) listAfter(ctx context.Context, prefix string, revision int64) (revRet int64, eventRet []*server.Event, errRet error) {
-	logrus.Tracef("listAfter %s, start=%s, limit=%d, rev=%d")
+	//logrus.Tracef("listAfter %s, start=%s, limit=%d, rev=%d")
 
 	entries, err := j.getKeyValues(ctx, prefix, false)
 
@@ -512,9 +568,16 @@ func (j *Jetstream) listAfter(ctx context.Context, prefix string, revision int64
 
 // Count returns an exact count of the number of matching keys and the current revision of the database
 func (j *Jetstream) Count(ctx context.Context, prefix string) (revRet int64, count int64, err error) {
-	logrus.Tracef("COUNT %s", prefix)
+	//logrus.Tracef("COUNT %s", prefix)
+	start := time.Now()
 	defer func() {
-		logrus.Tracef("COUNT %s => rev=%d, count=%d, err=%v", prefix, revRet, count, err)
+		duration := time.Duration(time.Now().Nanosecond() - start.Nanosecond())
+		fStr := "COUNT %s => rev=%d, count=%d, err=%v, duration=%d"
+		if duration.Milliseconds() > kSlowMethod {
+			logrus.Warnf(fStr, prefix, revRet, count, err, duration.Milliseconds())
+		} else {
+			logrus.Tracef(fStr, prefix, revRet, count, err, duration.Milliseconds())
+		}
 	}()
 
 	entries, err := j.getKeys(ctx, prefix, false)
@@ -537,16 +600,34 @@ func (j *Jetstream) Count(ctx context.Context, prefix string) (revRet int64, cou
 }
 
 func (j *Jetstream) Update(ctx context.Context, key string, value []byte, revision, lease int64) (revRet int64, kvRet *server.KeyValue, updateRet bool, errRet error) {
-	logrus.Tracef("UPDATE %s, value=%d, rev=%d, lease=%v", key, len(value), revision, lease)
+	//logrus.Tracef("UPDATE %s, value=%d, rev=%d, lease=%v", key, len(value), revision, lease)
+	start := time.Now()
 	defer func() {
+		duration := time.Duration(time.Now().Nanosecond() - start.Nanosecond())
 		kvRev := int64(0)
 		if kvRet != nil {
 			kvRev = kvRet.ModRevision
 		}
-		logrus.Tracef("UPDATE %s, value=%d, rev=%d, lease=%v => rev=%d, kvrev=%d, updated=%v, err=%v", key, len(value), revision, lease, revRet, kvRev, updateRet, errRet)
+		fStr := "UPDATE %s, value=%d, rev=%d, lease=%v => rev=%d, kvrev=%d, updated=%v, err=%v, duration=%d"
+		if duration.Milliseconds() > kSlowMethod {
+			logrus.Warnf(fStr, key, len(value), revision, lease, revRet, kvRev, updateRet, errRet, duration.Milliseconds())
+		} else {
+			logrus.Tracef(fStr, key, len(value), revision, lease, revRet, kvRev, updateRet, errRet, duration.Milliseconds())
+		}
 	}()
-	j.kvBucketMutex.Lock()
-	defer j.kvBucketMutex.Unlock()
+
+	lockFolder := getFolder(key)
+	if lockFolder != "" {
+		j.kvDirectoryMutex.Lock()
+		if _, ok := j.kvDirectoryMuxes[lockFolder]; !ok {
+			j.kvDirectoryMuxes[lockFolder] = &sync.RWMutex{}
+		}
+		j.kvDirectoryMutex.Unlock()
+		j.kvDirectoryMuxes[lockFolder].Lock()
+		defer j.kvDirectoryMuxes[lockFolder].Unlock()
+	}
+	//j.kvBucketMutex.Lock()
+	//defer j.kvBucketMutex.Unlock()
 
 	rev, prevKV, err := j.get(ctx, key, 0, false)
 
@@ -601,7 +682,7 @@ func (j *Jetstream) Watch(ctx context.Context, prefix string, revision int64) <-
 
 	watchCtx, _ := context.WithCancel(ctx)
 
-	logrus.Tracef("WATCH %s, rev=%d", prefix, revision)
+	//logrus.Tracef("WATCH %s, rev=%d", prefix, revision)
 
 	watcher, err := j.kvBucket.(*kv.EncodedKV).WatchWithCtx(watchCtx, prefix, nats.IgnoreDeletes())
 
@@ -628,7 +709,7 @@ func (j *Jetstream) Watch(ctx context.Context, prefix string, revision int64) <-
 			case i := <-watcher.Updates():
 				if i != nil {
 					if int64(i.Revision()) > revision {
-						logrus.Debugf("update %v", i.Key())
+						//logrus.Debugf("update %v", i.Key())
 						events := make([]*server.Event, 1)
 						var err error
 						value := JSValue{
@@ -702,7 +783,14 @@ func (j *Jetstream) Watch(ctx context.Context, prefix string, revision int64) <-
 
 // getPreviousEntry returns the nats.KeyValueEntry previous to the one provided, if the previous entry is a nats.KeyValuePut
 // operation. If it is not a KeyValuePut then it will return nil.
-func (j *Jetstream) getPreviousEntry(ctx context.Context, entry nats.KeyValueEntry) (*nats.KeyValueEntry, error) {
+func (j *Jetstream) getPreviousEntry(ctx context.Context, entry nats.KeyValueEntry) (result *nats.KeyValueEntry, e error) {
+	defer func() {
+		if result != nil {
+			logrus.Debugf("getPreviousEntry %s:%d found=true %s", entry.Key(), entry.Revision(), (*result).Revision())
+		} else {
+			logrus.Debugf("getPreviousEntry %s:%d found=false")
+		}
+	}()
 	found := false
 	entries, err := j.kvBucket.History(entry.Key(), nats.Context(ctx))
 	if err == nil {
@@ -759,7 +847,6 @@ func decode(e nats.KeyValueEntry) (JSValue, error) {
 			logrus.Debugf("bytes returned: %v", len(e.Value()))
 			return v, err
 		}
-		logrus.Debugf("Revising %s ModVersion=[%d]", e.Key(), e.Revision())
 		v.KV.ModRevision = int64(e.Revision())
 	}
 	return v, nil
@@ -783,7 +870,6 @@ func (j *Jetstream) compactRevision() (int64, error) {
 
 // getKeyValues returns a []nats.KeyValueEntry matching prefix
 func (j *Jetstream) getKeyValues(ctx context.Context, prefix string, sortResults bool) ([]nats.KeyValueEntry, error) {
-	logrus.Debugf("getKeyValues %s", prefix)
 	watcher, err := j.kvBucket.(*kv.EncodedKV).WatchWithCtx(ctx, prefix, nats.IgnoreDeletes())
 	//watcher, err := j.kvBucket.Watch(prefix, nats.IgnoreDeletes(), nats.Context(ctx))
 	if err != nil {
@@ -813,9 +899,8 @@ func (j *Jetstream) getKeyValues(ctx context.Context, prefix string, sortResults
 	return entries, nil
 }
 
-// getKeys returns a listAfter of keys matching a prefix
+// getKeys returns a list of keys matching a prefix
 func (j *Jetstream) getKeys(ctx context.Context, prefix string, sortResults bool) ([]string, error) {
-	logrus.Debugf("getKeys %s", prefix)
 	watcher, err := j.kvBucket.(*kv.EncodedKV).WatchWithCtx(ctx, prefix, nats.MetaOnly(), nats.IgnoreDeletes())
 	//watcher, err := j.kvBucket.Watch(prefix, nats.MetaOnly(), nats.IgnoreDeletes(), nats.Context(ctx))
 	if err != nil {
@@ -842,4 +927,12 @@ func (j *Jetstream) getKeys(ctx context.Context, prefix string, sortResults bool
 	}
 
 	return keys, nil
+}
+
+func getFolder(key string) string {
+	if directoryMatch.MatchString(key) {
+		matches := directoryMatch.FindStringSubmatch(key)
+		return matches[1]
+	}
+	return ""
 }

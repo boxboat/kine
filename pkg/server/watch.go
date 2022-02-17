@@ -59,7 +59,7 @@ func (w *watcher) Start(ctx context.Context, r *etcdserverpb.WatchCreateRequest)
 
 	key := string(r.Key)
 
-	logrus.Tracef("WATCH START id=%d, count=%d, key=%s, revision=%d", id, len(w.watches), key, r.StartRevision)
+	//logrus.Tracef("WATCH START id=%d, count=%d, key=%s, revision=%d", id, len(w.watches), key, r.StartRevision)
 
 	go func() {
 		defer w.wg.Done()
@@ -77,11 +77,11 @@ func (w *watcher) Start(ctx context.Context, r *etcdserverpb.WatchCreateRequest)
 				continue
 			}
 
-			if logrus.IsLevelEnabled(logrus.DebugLevel) {
-				for _, event := range events {
-					logrus.Tracef("WATCH READ id=%d, key=%s, revision=%d", id, event.KV.Key, event.KV.ModRevision)
-				}
-			}
+			//if logrus.IsLevelEnabled(logrus.DebugLevel) {
+			//	for _, event := range events {
+			//		logrus.Tracef("WATCH READ id=%d, key=%s, revision=%d", id, event.KV.Key, event.KV.ModRevision)
+			//	}
+			//}
 
 			if err := w.server.Send(&etcdserverpb.WatchResponse{
 				Header:  txnHeader(events[len(events)-1].KV.ModRevision),
@@ -93,7 +93,7 @@ func (w *watcher) Start(ctx context.Context, r *etcdserverpb.WatchCreateRequest)
 			}
 		}
 		w.Cancel(id, nil)
-		logrus.Tracef("WATCH CLOSE id=%d, key=%s", id, key)
+		//logrus.Tracef("WATCH CLOSE id=%d, key=%s", id, key)
 	}()
 }
 

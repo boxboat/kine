@@ -262,7 +262,6 @@ func (e *EncodedKV) Purge(key string) error {
 func (e *EncodedKV) WatchWithCtx(ctx context.Context, keys string, opts ...nats.WatchOpt) (nats.KeyWatcher, error) {
 	opts = append(opts, nats.Context(ctx))
 	ek, err := e.keyCodec.EncodeRange(keys)
-	logrus.Debugf("watching [%s]", ek)
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +276,6 @@ func (e *EncodedKV) WatchWithCtx(ctx context.Context, keys string, opts ...nats.
 
 func (e *EncodedKV) Watch(keys string, opts ...nats.WatchOpt) (nats.KeyWatcher, error) {
 	ek, err := e.keyCodec.EncodeRange(keys)
-	logrus.Debugf("watching [%s]", ek)
 	if err != nil {
 		return nil, err
 	}
