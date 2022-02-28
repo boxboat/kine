@@ -332,5 +332,5 @@ func (e *EncodedKV) Keys(opts ...nats.WatchOpt) ([]string, error) {
 }
 
 func (e *EncodedKV) Bucket() string                           { return e.bucket.Bucket() }
-func (e *EncodedKV) PurgeDeletes(opts ...nats.WatchOpt) error { return e.bucket.PurgeDeletes(opts...) }
+func (e *EncodedKV) PurgeDeletes(opts ...nats.PurgeOpt) error { return e.bucket.PurgeDeletes(opts...) }
 func (e *EncodedKV) Status() (nats.KeyValueStatus, error)     { return e.bucket.Status() }

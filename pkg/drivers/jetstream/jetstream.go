@@ -77,35 +77,9 @@ func New(ctx context.Context, connection string) (server.Backend, error) {
 
 	kvB := kv.NewEncodedKV(bucket, &kv.EtcdKeyCodec{}, &kv.S2ValueCodec{})
 
-	//kvB, err := js.KeyValue(kineBucket)
-	//if err != nil && err == nats.ErrBucketNotFound {
-	//	kvB, err = js.CreateKeyValue(
-	//		&nats.KeyValueConfig{
-	//			Bucket:      kineBucket,
-	//			Description: "Holds kine key/values",
-	//			// TODO this needs to be 1000?
-	//			History: 64,
-	//		})
-	//}
-
 	if err != nil {
 		return nil, err
 	}
-
-	// hack around int8 history limit to adjust underlying stream
-	//status, err := kvB.Status()
-	//if err != nil {
-	//	return nil, err
-	//}
-	//
-	//streamInfo := status.(*nats.KeyValueBucketStatus).StreamInfo()
-	//cfg := &streamInfo.Config
-	//cfg.MaxMsgsPerSubject = 1000
-	//_, err = js.UpdateStream(cfg)
-	//
-	//if err != nil {
-	//	return nil, err
-	//}
 
 	return &Jetstream{
 		kvBucket:         kvB,
@@ -257,8 +231,6 @@ func (j *Jetstream) Create(ctx context.Context, key string, value []byte, lease 
 		j.kvDirectoryMuxes[lockFolder].Lock()
 		defer j.kvDirectoryMuxes[lockFolder].Unlock()
 	}
-	//j.kvBucketMutex.Lock()
-	//defer j.kvBucketMutex.Unlock()
 
 	// check if key exists already
 	rev, prevKV, err := j.get(ctx, key, 0, true)
@@ -328,8 +300,6 @@ func (j *Jetstream) Delete(ctx context.Context, key string, revision int64) (rev
 		j.kvDirectoryMuxes[lockFolder].Lock()
 		defer j.kvDirectoryMuxes[lockFolder].Unlock()
 	}
-	//j.kvBucketMutex.Lock()
-	//defer j.kvBucketMutex.Unlock()
 
 	rev, value, err := j.get(ctx, key, 0, true)
 	if err != nil {
@@ -626,8 +596,6 @@ func (j *Jetstream) Update(ctx context.Context, key string, value []byte, revisi
 		j.kvDirectoryMuxes[lockFolder].Lock()
 		defer j.kvDirectoryMuxes[lockFolder].Unlock()
 	}
-	//j.kvBucketMutex.Lock()
-	//defer j.kvBucketMutex.Unlock()
 
 	rev, prevKV, err := j.get(ctx, key, 0, false)
 
